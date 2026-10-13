@@ -1,0 +1,142 @@
+/// <reference types="vite/client" />
+
+import type { QaEvent, QaRunRequest } from './shared/run';
+import type { SchedulerTask, SchedulerTaskDraft } from './shared/scheduler';
+import type { QaRunRequestV2, QaRunRequestV3 } from './shared/qaMatrix';
+import type { AutoRerunMode, AutoRerunState, BulkDeleteRunScope, RunDetail, RunSummary, StuckRunRecoveryState } from './shared/runCenter';
+import type { SavedStreamingArtist, SpotifyCatalogConnectionStatus, StreamingAccountPublic, StreamingAccountVerificationSession, StreamingCatalogFetchResult, StreamingCatalogProgress, StreamingCollection, StreamingDeviceFamily, StreamingPlatform, StreamingRunConfig, StreamingSourceInspection, StreamingTrack } from './shared/streaming';
+import type { MobileStatus } from './shared/mobileDevices';
+import type { SocialAccountPublic, SocialAccountVerificationSession, SocialPlatform, SocialQaGroup, SocialRunRequest, SocialRunSummary, SocialTarget } from './shared/social';
+import type { QaCookieDraft, QaCookieRecord } from './shared/cookies';
+import type { ProxyActivityEntry, ProxyImportResult, ProxyKind, ProxyPublicRecord, ProxySource, ProxySummary } from './shared/proxy';
+import type { BrowserRuntimeStatus, ProxyIpHistoryPage, ProxyIpHistoryQuery, ProxyIpHistoryRecordingState, RunProxyIpSummary } from './shared/proxyIpHistory';
+import type {
+  RealIosProviderPublicConfig,
+  RealIosProviderSaveRequest,
+  RealIosProviderStatus,
+} from './shared/realIos';
+
+declare global {
+  interface Window {
+    orbitqa?: {
+      listScheduledTasks: () => Promise<SchedulerTask[]>;
+      saveScheduledTask: (request: SchedulerTaskDraft) => Promise<SchedulerTask>;
+      deleteScheduledTask: (id: string) => Promise<{ id:string; deleted:boolean }>;
+      setScheduledTaskEnabled: (id: string, enabled:boolean) => Promise<SchedulerTask>;
+      runScheduledTaskNow: (id:string) => Promise<{ status:'success'|'failed'; message:string; task?:SchedulerTask }>;
+      getAppInfo: () => Promise<{
+        name: string;
+        version: string;
+        platform: string;
+      }>;
+      getMobileStatus: () => Promise<MobileStatus>;
+      listAvds: () => Promise<string[]>;
+      launchAvd: (name: string) => Promise<{ serial: string; state: string; alreadyRunning?: boolean }>;
+      stopAvd: (serial?: string) => Promise<{ serial: string; state: string }>;
+      getRealIosProviderConfig: () => Promise<RealIosProviderPublicConfig | null>;
+      saveRealIosProviderConfig: (request: RealIosProviderSaveRequest) => Promise<RealIosProviderPublicConfig>;
+      checkRealIosProvider: () => Promise<RealIosProviderStatus>;
+      listQaCookies: () => Promise<QaCookieRecord[]>;
+      addQaCookie: (request: QaCookieDraft) => Promise<QaCookieRecord>;
+      importQaCookiesJson: (json: string) => Promise<{ imported: number; skipped: number; total: number; errors?: string[] }>;
+      deleteQaCookies: (ids: string[]) => Promise<{ deleted:number }>;
+      setQaCookiesEnabled: (ids: string[], enabled:boolean) => Promise<QaCookieRecord[]>;
+      listProxies: (kind?: ProxyKind) => Promise<ProxyPublicRecord[]>;
+      importProxies: (request: { text: string; kind: ProxyKind; replacePasswords?: boolean }) => Promise<ProxyImportResult>;
+      updateProxy: (id: string, patch: Partial<Pick<ProxyPublicRecord, 'kind' | 'protocol' | 'hostname' | 'port' | 'username' | 'enabled'>> & { password?: string }) => Promise<ProxyPublicRecord>;
+      deleteProxies: (ids: string[]) => Promise<void>;
+      setProxiesEnabled: (ids: string[], enabled: boolean) => Promise<ProxyPublicRecord[]>;
+      checkProxy: (id: string) => Promise<ProxyPublicRecord>;
+      checkProxies: (ids: string[]) => Promise<ProxyPublicRecord[]>;
+      recheckDeadProxies: () => Promise<ProxyPublicRecord[]>;
+      getProxySummary: () => Promise<ProxySummary>;
+      getProxyActivity: () => Promise<ProxyActivityEntry[]>;
+      exportSafeProxies: (options?: { kind?: ProxyKind; includeUsernames?: boolean }) => Promise<string>;
+      acceptStaticProxyIp: (id: string) => Promise<ProxyPublicRecord>;
+      getQaRunState: () => Promise<{ phase: 'idle' | 'running' | 'stopping'; runId: string | null; activeCount?: number }>;
+      createQaRun: (request: QaRunRequest | QaRunRequestV2 | QaRunRequestV3) => Promise<{ runId: string }>;
+      startQaRun: (request: QaRunRequest | QaRunRequestV2 | QaRunRequestV3) => Promise<{ runId: string }>;
+      listQaRuns: () => Promise<RunSummary[]>;
+      getQaRun: (runId: string) => Promise<RunDetail | null>;
+      pauseQaRun: (runId: string) => Promise<{ runId: string; paused: boolean; status?: string }>;
+      resumeQaRun: (runId: string) => Promise<{ runId: string; resumed: boolean }>;
+      rerunQaRun: (runId: string) => Promise<{ runId: string; rerun: boolean; sourceRunId?: string; reason?: string }>;
+      deleteQaRun: (runId: string) => Promise<{ runId: string; deleted: boolean; reason?: string }>;
+      bulkDeleteQaRuns: (scope: BulkDeleteRunScope, runKind?: 'run' | 'streaming' | 'social') => Promise<{ scope: BulkDeleteRunScope; deleted: number; runIds: string[] }>;
+      getAutoRerunState: (runKind?: 'run' | 'streaming' | 'social') => Promise<AutoRerunState>;
+      configureAutoRerun: (request: { enabled?: boolean; mode?: AutoRerunMode; maxConcurrent?: number; selectedRunIds?: string[] }, runKind?: 'run' | 'streaming' | 'social') => Promise<AutoRerunState>;
+      getStuckRunRecoveryState: (runKind?: 'run' | 'streaming' | 'social') => Promise<StuckRunRecoveryState>;
+      configureStuckRunRecovery: (request: { enabled?: boolean; timeoutMinutes?: number; maxAttempts?: number }, runKind?: 'run' | 'streaming' | 'social') => Promise<StuckRunRecoveryState>;
+      stopAllQaRuns: (runKind?: 'run' | 'streaming' | 'social') => Promise<{ stopped: number; runIds: string[] }>;
+      stopQaRun: (runId: string) => Promise<{ runId: string; stopped: boolean; state?: { phase: 'idle' | 'running' | 'stopping'; runId: string | null } }>;
+      getBrowserRuntimeStatus: () => Promise<BrowserRuntimeStatus>;
+      listProxyIpHistory: (query?: ProxyIpHistoryQuery) => Promise<ProxyIpHistoryPage>;
+      getRunProxyIpSummary: (runId: string) => Promise<RunProxyIpSummary>;
+      clearProxyIpHistory: () => Promise<boolean>;
+      exportProxyIpHistoryCsv: (query?: ProxyIpHistoryQuery) => Promise<string>;
+      getProxyIpHistoryRecordingState: () => Promise<ProxyIpHistoryRecordingState>;
+      setProxyIpHistoryRecordingState: (enabled: boolean) => Promise<ProxyIpHistoryRecordingState>;
+      listStreamingPlatforms: () => Promise<Array<{ id: StreamingPlatform; label: string; supports?: Record<string, boolean> }>>;
+      resolveStreamingCatalog: (request: { platform: StreamingPlatform; input: string }) => Promise<{ platform: StreamingPlatform; kind: string; input: string; tracks: StreamingTrack[] }>;
+      listStreamingCollections: () => Promise<StreamingCollection[]>;
+      checkStreamingDuplicate: (request: { input: string; ignoreCollectionId?: string }) => Promise<{ duplicate: true; kind: string; platform: StreamingPlatform; collectionId: string; collectionName: string; message: string } | null>;
+      saveStreamingCollection: (request: Partial<StreamingCollection> & { name: string; platform: StreamingPlatform }) => Promise<StreamingCollection>;
+      deleteStreamingCollection: (collectionId: string) => Promise<{ id: string; deleted: boolean }>;
+      startStreamingLinkVerification: (request: { collectionId: string; trackId?: string; deviceMode: StreamingDeviceFamily; deviceProfile: string }) => Promise<{ sessionId: string; targetKey: string; url: string; deviceMode: StreamingDeviceFamily; deviceProfile: string; openedAt: string }>;
+      completeStreamingLinkVerification: (request: { sessionId: string; collectionId: string; trackId?: string }) => Promise<StreamingCollection>;
+      listStreamingAccounts: () => Promise<StreamingAccountPublic[]>;
+      saveStreamingAccount: (request: Partial<StreamingAccountPublic> & { platform: StreamingPlatform; label: string; password?: string; sessionSecret?: string }) => Promise<StreamingAccountPublic>;
+      assignStreamingStickyProxy: (accountId: string, request?: { mode:'auto'|'manual'; proxyId?:string }) => Promise<StreamingAccountPublic>;
+      deleteStreamingAccount: (accountId: string) => Promise<{ id: string; deleted: boolean }>;
+      verifyStreamingAccount: (accountId: string) => Promise<{ ok: boolean; reason?: string; account?: StreamingAccountPublic }>;
+      repairStreamingAccountProfile: (accountId: string) => Promise<{ repaired: boolean; backupDir?: string; createdFresh?: boolean; profileDir?: string }>;
+      startStreamingAccountVerification: (request: { accountId: string; proxySource: ProxySource; deviceMode: StreamingDeviceFamily; deviceProfile: string }) => Promise<StreamingAccountVerificationSession>;
+      completeStreamingAccountVerification: (request: { sessionId: string }) => Promise<{ ok: boolean; pending?: boolean; reason?: string; account?: StreamingAccountPublic }>;
+      cancelStreamingAccountVerification: (request: { sessionId: string }) => Promise<{ cancelled: boolean; accountId?: string }>;
+      getSpotifyCatalogConnectionStatus: () => Promise<SpotifyCatalogConnectionStatus>;
+      configureSpotifyCatalogClientId: (clientId: string) => Promise<SpotifyCatalogConnectionStatus>;
+      connectSpotifyCatalog: (request?: { clientId?: string; timeoutMs?: number }) => Promise<SpotifyCatalogConnectionStatus>;
+      disconnectSpotifyCatalog: (request?: { clientId?: string; timeoutMs?: number }) => Promise<SpotifyCatalogConnectionStatus>;
+      inspectStreamingSource: (request: { input: string; operationId: string }) => Promise<StreamingSourceInspection>;
+      fetchStreamingArtistCatalog: (request: { platformArtistId: string; operationId: string; previousSavedArtistId?: string }) => Promise<StreamingCatalogFetchResult>;
+      cancelStreamingCatalogOperation: (operationId: string) => Promise<{ operationId: string; cancelled: boolean }>;
+      listSavedStreamingArtists: () => Promise<SavedStreamingArtist[]>;
+      getSavedStreamingArtist: (id: string) => Promise<SavedStreamingArtist | null>;
+      saveStreamingArtistSelection: (request: { savedArtistId?: string; platformArtistId: string; selectedTrackIds: string[]; sourceOrigin: { kind: 'artist'|'album'|'playlist'|'track'|'search'; input: string; addedAt?: string } }) => Promise<SavedStreamingArtist>;
+      refreshSavedStreamingArtist: (request: { savedArtistId: string; operationId: string }) => Promise<SavedStreamingArtist>;
+      setSavedStreamingArtistAutoRefresh: (id: string, enabled: boolean) => Promise<SavedStreamingArtist>;
+      deleteSavedStreamingArtist: (id: string) => Promise<{ id: string; deleted: boolean }>;
+      listLegacyStreamingCollections: () => Promise<StreamingCollection[]>;
+      convertLegacyStreamingCollection: (request: { id: string; platformArtistId?: string }) => Promise<{ converted: boolean; reason?: string; artist?: SavedStreamingArtist }>;
+      refreshStaleSavedStreamingArtists: (request?: { reason?: 'hub-open'|'pre-run'; operationId?: string }) => Promise<{ refreshedArtistIds: string[]; warnings: string[] }>;
+      onStreamingCatalogProgress: (listener: (progress: StreamingCatalogProgress) => void) => () => void;
+      startStreamingRun: (request: StreamingRunConfig) => Promise<{ runId: string }>;
+      listSocialPlatforms: () => Promise<Array<{ id: SocialPlatform; label: string }>>;
+      listSocialAccounts: () => Promise<SocialAccountPublic[]>;
+      saveSocialAccount: (request: Partial<SocialAccountPublic> & { platform: SocialPlatform; label: string; password?: string; sessionSecret?: string }) => Promise<SocialAccountPublic>;
+      assignSocialStickyProxy: (accountId: string, request?: { mode:'auto'|'manual'; proxyId?:string }) => Promise<SocialAccountPublic>;
+      deleteSocialAccount: (accountId: string) => Promise<{ id: string; deleted: boolean }>;
+      startSocialAccountVerification: (request: { accountId: string }) => Promise<SocialAccountVerificationSession>;
+      completeSocialAccountVerification: (request: { sessionId: string }) => Promise<{ ok: boolean; pending?: boolean; reason?: string; account?: SocialAccountPublic }>;
+      cancelSocialAccountVerification: (request: { sessionId: string }) => Promise<{ cancelled: boolean; accountId?: string }>;
+      verifySocialAccount: (accountId: string) => Promise<{ ok: boolean; reason?: string; account?: SocialAccountPublic }>;
+      listSocialTargets: () => Promise<SocialTarget[]>;
+      addSocialTargets: (request: { urls: string[] }) => Promise<{ added: SocialTarget[]; duplicates: string[]; invalid: string[] }>;
+      updateSocialTarget: (id: string, patch: Partial<SocialTarget>) => Promise<SocialTarget>;
+      deleteSocialTarget: (id: string) => Promise<{ id: string; deleted: boolean }>;
+      listSocialGroups: () => Promise<SocialQaGroup[]>;
+      saveSocialGroup: (request: Partial<SocialQaGroup> & { name: string; platform: SocialPlatform }) => Promise<SocialQaGroup>;
+      deleteSocialGroup: (id: string) => Promise<{ id: string; deleted: boolean }>;
+      startSocialRun: (request: SocialRunRequest) => Promise<{ runId: string; plannedTasks?: number; workerCount?: number; groupWorkload?: Array<{groupId:string;groupName:string;accounts:number;targets:number;plannedTasks:number;workerCount:number;mode:string}> }>;
+      stopSocialRun: (runId: string) => Promise<{ runId: string; stopped: boolean }>;
+      listSocialRuns: () => Promise<SocialRunSummary[]>;
+      getSocialRun: (runId: string) => Promise<SocialRunSummary | null>;
+      clearSocialRuns: () => Promise<{ cleared: boolean }>;
+      clearResolvedSocialActions: () => Promise<{ remaining: number }>;
+      onSocialEvent: (listener: (event: { runId: string; at: string; severity?: string; message: string }) => void) => () => void;
+      onQaEvent: (listener: (event: QaEvent) => void) => () => void;
+    };
+  }
+}
+
+export {};

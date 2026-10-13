@@ -1,0 +1,4 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
+function read(p){return fs.readFileSync(path.join(__dirname,'..',p),'utf8');}
+test('v0.20.0 exposes Social Hub and Test Social Accounts',()=>{const app=read('src/App.tsx'),side=read('src/components/Sidebar.tsx'),preload=read('electron/preload.cjs');assert.match(app,/SocialHub/);assert.match(side,/Social Hub/);assert.match(side,/Test Social Accounts/);assert.match(preload,/startSocialRun/);assert.match(preload,/startSocialAccountVerification/);});
+test('current social runner performs only explicitly selected social write tasks',()=>{const runner=read('electron/social/social-runner.cjs');assert.match(runner,/checks.includes\('comment-submit'\)/);assert.match(runner,/checks.includes\('like-action'\)/);assert.match(runner,/checks.includes\('follow-toggle'\)/);});

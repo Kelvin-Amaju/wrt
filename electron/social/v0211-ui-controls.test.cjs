@@ -1,0 +1,3 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const read=(p)=>fs.readFileSync(path.join(__dirname,'../..',p),'utf8');
+test('v0.21.1 sidebar navigation is vertically scrollable for short windows',()=>{const css=read('src/styles.css');assert.match(css,/\.sidebar \{[^}]*min-height: 0;[^}]*overflow: hidden;/s);assert.match(css,/\.sidebar__nav \{[^}]*min-height: 0;[^}]*overflow-y: auto;/s);});
+test('v0.21.1 live Social QA log has a clear-all control',()=>{const hub=read('src/pages/SocialHub.tsx');assert.match(hub,/LIVE SOCIAL QA LOG/);assert.match(hub,/onClick=\{\(\)=>setSocialEvents\(\[\]\)\}>CLEAR ALL<\/button>/);});

@@ -1,0 +1,19 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
+const {SOCIAL_PLATFORMS}=require('./platforms.cjs');const nav=require('./search-navigator.cjs')._test;const runner=require('./social-runner.cjs')._test;
+const read=p=>fs.readFileSync(path.join(__dirname,'..','..',p),'utf8');
+test('v0.21.5 social adapters expose search, comment, like, follow and share controls on every platform',()=>{for(const [id,c] of Object.entries(SOCIAL_PLATFORMS)){for(const key of ['searchInputSelectors','commentComposerSelectors','commentSubmitSelectors','likeSelectors','likedSelectors','followSelectors','shareSelectors'])assert.ok(Array.isArray(c[key])&&c[key].length,`${id}.${key}`);assert.ok(Array.isArray(c.commentSectionSelectors)&&c.commentSectionSelectors.length,`${id}.commentSectionSelectors`);}});
+test('v0.21.5 canonical identities cover every supported social content platform',()=>{const cases=[
+ ['youtube','https://youtu.be/ABC123','https://www.youtube.com/watch?v=ABC123'],
+ ['instagram','https://www.instagram.com/reel/XYZ/','https://instagram.com/reel/XYZ/?utm_source=x'],
+ ['x','https://x.com/a/status/12345','https://twitter.com/b/status/12345?s=1'],
+ ['pinterest','https://pinterest.com/pin/991122/','https://www.pinterest.com/pin/991122/?utm_source=x'],
+ ['tiktok','https://www.tiktok.com/@one/video/741234567890','https://www.tiktok.com/@two/video/741234567890?lang=en'],
+ ['reddit','https://www.reddit.com/r/a/comments/abc12/title/','https://reddit.com/r/b/comments/abc12/other/'],
+ ['linkedin','https://www.linkedin.com/feed/update/urn:li:activity:7291234567890123456/','https://linkedin.com/posts/x_activity-7291234567890123456-x'],
+ ['facebook','https://www.facebook.com/user/videos/123456789/','https://facebook.com/reel/123456789/'],
+];for(const [platform,a,b] of cases)assert.equal(nav.targetIdentity(platform,a),nav.targetIdentity(platform,b),platform);});
+test('search result maps are platform specific before generic anchors',()=>{for(const id of Object.keys(SOCIAL_PLATFORMS)){const selectors=nav.resultSelectors(id);assert.ok(selectors.length>=2,id);assert.equal(selectors.at(-1),'a[href]');}});
+test('selected social like/follow actions are ensure-active, never remove an already active state',async()=>{const visible=()=>({isVisible:async()=>true});const page={locator:(selector)=>({first:()=>selector.includes('active')?visible():{isVisible:async()=>false}})};assert.equal(typeof runner.executeSelectedActionsOnPage,'function');const source=read('electron/social/social-runner.cjs');assert.match(source,/already liked\/reacted; no duplicate action/);assert.match(source,/already followed\/subscribed; no duplicate action/);assert.doesNotMatch(source,/Existing follow\/subscription removed/);});
+test('media observation keeps a fixed wall-clock deadline and auto-recovers page/player stalls',()=>{const source=read('electron/social/social-runner.cjs');assert.match(source,/readyDeadline/);assert.match(source,/observationDeadline=observationStartedAt\+targetMs/);assert.match(source,/temporaryError\(currentPage\)/);assert.match(source,/youtubePlayerError\(currentPage\)/);assert.match(source,/media-timer-stalled/);assert.match(source,/currentPage\.reload/);});
+test('Run Center is separated into Run, Streaming Hub and Social Hub lanes',()=>{const source=read('src/pages/RunCenter.tsx');for(const label of ["title:'RUN'","title:'STREAMING HUB'","title:'SOCIAL HUB'"])assert.match(source,new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));assert.match(source,/run-kind-view/);assert.match(source,/runLaneKind/);});
+test('TARGET URL POOL no longer advertises savevidly.xyz',()=>{assert.doesNotMatch(read('src/components/UrlPoolEditor.tsx'),/savevidly\.xyz/i);assert.doesNotMatch(read('src/components/TargetPlanEditor.tsx'),/savevidly\.xyz/i);});

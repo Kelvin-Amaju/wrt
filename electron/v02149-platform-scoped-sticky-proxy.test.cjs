@@ -1,0 +1,4 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
+const read=p=>fs.readFileSync(path.join(__dirname,'..',p),'utf8');
+test('manual sticky assignment excludes only same-platform accounts',()=>{const main=read('electron/main.cjs');assert.match(main,/staticProxyExclusionsForAccount/);assert.match(main,/other\?\.platform/);assert.match(main,/===platform/);assert.match(main,/staticProxyExclusionsForAccount\('streaming',account\)/);assert.match(main,/staticProxyExclusionsForAccount\('social',account\)/);});
+test('manual login and task allocation use platform-scoped static reservations',()=>{const factory=read('electron/streaming/streaming-browser-factory.cjs');assert.match(factory,/function staticProxyPlatformScope/);const hits=factory.match(/reservationScope:staticProxyPlatformScope\(account\)/g)||[];assert.ok(hits.length>=2);});

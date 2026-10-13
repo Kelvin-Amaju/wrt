@@ -1,0 +1,30 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { SavedStreamingArtist, StreamingCatalogFetchResult, StreamingCatalogProgress, StreamingSourceInspection } from '../shared/streaming';
+
+export function StreamingImportWorkspace({connected,input,setInput,inspection,chosenArtistId,catalog,selected,setSelected,progress,busy,editingArtist,onInspect,onChooseArtist,onSave,onClearWorkspace}:{
+  connected:boolean; input:string; setInput:(v:string)=>void; inspection:StreamingSourceInspection|null; chosenArtistId:string; catalog:StreamingCatalogFetchResult|null; selected:Set<string>; setSelected:(next:Set<string>)=>void; progress:StreamingCatalogProgress|null; busy:boolean; editingArtist:SavedStreamingArtist|null; onInspect:()=>void; onChooseArtist:(id:string)=>void; onSave:()=>void; onClearWorkspace:()=>void;
+}){
+  const [visibleLimit,setVisibleLimit]=useState(100);
+  useEffect(()=>setVisibleLimit(100),[catalog?.artist.platformArtistId]);
+  const tracks=catalog?.tracks||[];
+  const visible=tracks.slice(0,visibleLimit);
+  const newUnsaved=useMemo(()=>tracks.filter(t=>t.isNew&&!selected.has(t.spotifyTrackId)),[tracks,selected]);
+  const toggle=(id:string)=>{const next=new Set(selected); next.has(id)?next.delete(id):next.add(id); setSelected(next);};
+  const selectAll=()=>setSelected(new Set(tracks.filter(t=>!t.unavailable).map(t=>t.spotifyTrackId)));
+  const addAllNew=()=>{const next=new Set(selected); for(const t of tracks) if(t.isNew&&!t.unavailable) next.add(t.spotifyTrackId); setSelected(next);};
+  return <section className="panel stream-card streaming-import-workspace">
+    <div className="panel__header"><div><span className="section-kicker">ARTIST IMPORT</span><h3>{editingArtist?`Edit ${editingArtist.artistName}`:'Artist / album / playlist / track'}</h3></div><span className="stream-stat-pill">{tracks.length} songs found</span></div>
+    {!editingArtist ? <div className="stream-catalog-input-row"><label className="field field--full"><span>Spotify Artist / Album / Playlist / Track URL or Artist Search</span><input value={input} onChange={e=>setInput(e.target.value)} placeholder="Paste a Spotify URL or search for an artist" disabled={busy}/></label><button type="button" className="primary-button" onClick={onInspect} disabled={!connected||busy||!input.trim()}>{busy?'WORKING…':'INSPECT SOURCE'}</button></div> : null}
+    {!connected ? <div className="stream-inline-warning">Connect Spotify Catalog above before importing a complete artist catalog.</div> : null}
+    {inspection&&inspection.candidateArtists.length>1&&!chosenArtistId ? <div className="stream-artist-chooser"><strong>Choose the artist whose complete catalog you want</strong><div>{inspection.candidateArtists.map(a=><button type="button" key={a.platformArtistId} onClick={()=>onChooseArtist(a.platformArtistId)}><span>{a.artworkUrl?<img src={a.artworkUrl} alt=""/>:<i>♪</i>}</span><b>{a.artistName}</b>{a.sourceTrackCount!==undefined?<small>{a.sourceTrackCount} playlist track{a.sourceTrackCount===1?'':'s'}</small>:null}</button>)}</div></div> : null}
+    {catalog ? <>
+      <div className="stream-chosen-artist"><span>{catalog.artist.artworkUrl?<img src={catalog.artist.artworkUrl} alt=""/>:<i>♪</i>}</span><div><small>CHOSEN ARTIST</small><strong>{catalog.artist.artistName}</strong><em>Spotify Artist · exact ID {catalog.artist.platformArtistId}</em></div><span className={`stream-fetch-badge stream-fetch-badge--${catalog.status}`}>{catalog.status.toUpperCase()}</span></div>
+      <div className="stream-catalog-toolbar"><button type="button" className="text-button" disabled={!tracks.length} onClick={selectAll}>Select All</button><button type="button" className="text-button" disabled={!selected.size} onClick={()=>setSelected(new Set())}>Clear Selection</button>{editingArtist&&newUnsaved.length?<button type="button" className="text-button" onClick={addAllNew}>Add All New</button>:null}<button type="button" className="text-button" onClick={onClearWorkspace}>Clear Workspace</button><span>{tracks.length} songs found · {selected.size} selected</span></div>
+      <div className="stream-track-list" aria-label="Artist catalog tracks">{visible.map(track=><label key={track.spotifyTrackId} className={selected.has(track.spotifyTrackId)?'stream-track-row stream-track-row--selected':'stream-track-row'}><input type="checkbox" checked={selected.has(track.spotifyTrackId)} disabled={track.unavailable} onChange={()=>toggle(track.spotifyTrackId)}/><span><strong>{track.title} {track.isNew&&!selected.has(track.spotifyTrackId)?<mark>NEW</mark>:null}</strong><small>{[track.artist,track.releaseName].filter(Boolean).join(' · ')}</small></span><em>{track.unavailable?'Unavailable':track.durationSeconds?`${Math.floor(track.durationSeconds/60)}:${String(track.durationSeconds%60).padStart(2,'0')}`:'Spotify'}</em></label>)}</div>
+      {visible.length<tracks.length?<button type="button" className="text-button stream-load-more" onClick={()=>setVisibleLimit(v=>Math.min(tracks.length,v+100))}>Load more tracks ({tracks.length-visible.length} remaining)</button>:null}
+      <div className="stream-import-save"><div><strong>{selected.size}</strong><span>{editingArtist?'songs selected for this saved artist':'songs selected to save under the artist name automatically'}</span></div><button type="button" className="secondary-button" disabled={busy||selected.size===0} onClick={onSave}>{editingArtist?'SAVE CHANGES':<>ADD {selected.size} SELECTED SONGS</>}</button></div>
+    </> : <div className="empty-state">{editingArtist?'Loading saved artist catalog…':'Inspect a source to resolve the exact artist, then fetch the complete credited catalog.'}</div>}
+    {progress?<div className="stream-import-progress"><strong>{progress.message}</strong>{progress.total?<span>{progress.completed||0} / {progress.total}</span>:null}</div>:null}
+    {!catalog&&input?<button type="button" className="text-button stream-clear-workspace" onClick={onClearWorkspace}>Clear Workspace</button>:null}
+  </section>;
+}

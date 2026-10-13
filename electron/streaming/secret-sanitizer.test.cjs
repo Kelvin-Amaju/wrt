@@ -1,0 +1,2 @@
+const test=require('node:test'); const assert=require('node:assert/strict'); const {sanitizeStreamingAccount}=require('./secret-sanitizer.cjs');
+test('sanitizer strips secrets',()=>{const out=sanitizeStreamingAccount({id:'a',platform:'spotify',label:'L',username:'u',password:'secret',sessionSecret:'sp_dc=x',token:'abc',proxySource:'none'}); const t=JSON.stringify(out); assert.equal(t.includes('secret'),false); assert.equal(t.includes('sp_dc'),false); assert.equal(t.includes('abc'),false);});

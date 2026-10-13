@@ -1,0 +1,3 @@
+const test=require('node:test');const assert=require('node:assert/strict');const {profileForCountry}=require('./geo-profile.cjs');
+test('proxy country maps to locale, timezone and language header',()=>{assert.deepEqual(profileForCountry('US'),{countryCode:'US',locale:'en-US',timezoneId:'America/New_York',languageHeader:'en-US,en;q=0.9'});assert.equal(profileForCountry('NG').timezoneId,'Africa/Lagos');assert.equal(profileForCountry('DE').locale,'de-DE');});
+test('unknown proxy country does not invent a host/US timezone fallback',()=>{const p=profileForCountry('ZZ');assert.equal(p.timezoneId,'');assert.equal(p.locale,'en-ZZ');});

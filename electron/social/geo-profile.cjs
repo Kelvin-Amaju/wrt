@@ -1,0 +1,27 @@
+const COUNTRY_PROFILES={
+ US:{locale:'en-US',timezoneId:'America/New_York',languageHeader:'en-US,en;q=0.9'},
+ GB:{locale:'en-GB',timezoneId:'Europe/London',languageHeader:'en-GB,en;q=0.9'},
+ NG:{locale:'en-NG',timezoneId:'Africa/Lagos',languageHeader:'en-NG,en;q=0.9'},
+ CA:{locale:'en-CA',timezoneId:'America/Toronto',languageHeader:'en-CA,en;q=0.9,fr;q=0.7'},
+ AU:{locale:'en-AU',timezoneId:'Australia/Sydney',languageHeader:'en-AU,en;q=0.9'},
+ DE:{locale:'de-DE',timezoneId:'Europe/Berlin',languageHeader:'de-DE,de;q=0.9,en;q=0.6'},
+ FR:{locale:'fr-FR',timezoneId:'Europe/Paris',languageHeader:'fr-FR,fr;q=0.9,en;q=0.6'},
+ ES:{locale:'es-ES',timezoneId:'Europe/Madrid',languageHeader:'es-ES,es;q=0.9,en;q=0.6'},
+ IT:{locale:'it-IT',timezoneId:'Europe/Rome',languageHeader:'it-IT,it;q=0.9,en;q=0.6'},
+ NL:{locale:'nl-NL',timezoneId:'Europe/Amsterdam',languageHeader:'nl-NL,nl;q=0.9,en;q=0.6'},
+ JP:{locale:'ja-JP',timezoneId:'Asia/Tokyo',languageHeader:'ja-JP,ja;q=0.9,en;q=0.5'},
+ KR:{locale:'ko-KR',timezoneId:'Asia/Seoul',languageHeader:'ko-KR,ko;q=0.9,en;q=0.5'},
+ IN:{locale:'en-IN',timezoneId:'Asia/Kolkata',languageHeader:'en-IN,en;q=0.9,hi;q=0.7'},
+ SG:{locale:'en-SG',timezoneId:'Asia/Singapore',languageHeader:'en-SG,en;q=0.9'},
+ BR:{locale:'pt-BR',timezoneId:'America/Sao_Paulo',languageHeader:'pt-BR,pt;q=0.9,en;q=0.5'},
+ MX:{locale:'es-MX',timezoneId:'America/Mexico_City',languageHeader:'es-MX,es;q=0.9,en;q=0.5'},
+ ZA:{locale:'en-ZA',timezoneId:'Africa/Johannesburg',languageHeader:'en-ZA,en;q=0.9'},
+ AE:{locale:'ar-AE',timezoneId:'Asia/Dubai',languageHeader:'ar-AE,ar;q=0.9,en;q=0.7'},
+ SE:{locale:'sv-SE',timezoneId:'Europe/Stockholm',languageHeader:'sv-SE,sv;q=0.9,en;q=0.6'},
+ NO:{locale:'nb-NO',timezoneId:'Europe/Oslo',languageHeader:'nb-NO,nb;q=0.9,en;q=0.6'},
+ CH:{locale:'de-CH',timezoneId:'Europe/Zurich',languageHeader:'de-CH,de;q=0.9,en;q=0.6'},
+ IE:{locale:'en-IE',timezoneId:'Europe/Dublin',languageHeader:'en-IE,en;q=0.9'},
+ NZ:{locale:'en-NZ',timezoneId:'Pacific/Auckland',languageHeader:'en-NZ,en;q=0.9'},
+};
+function profileForCountry(countryCode){const code=String(countryCode||'').trim().toUpperCase();if(COUNTRY_PROFILES[code])return {countryCode:code,...COUNTRY_PROFILES[code]};if(/^[A-Z]{2}$/.test(code))return {countryCode:code,locale:`en-${code}`,timezoneId:'',languageHeader:`en-${code},en;q=0.9`};return {countryCode:'',locale:'en',timezoneId:'',languageHeader:'en;q=0.9'};}
+module.exports={COUNTRY_PROFILES,profileForCountry};

@@ -1,0 +1,2 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');
+test('legacy v2 QA normalizer preserves required screenshot setting after v0.13.4',()=>{const s=fs.readFileSync('src/shared/qaMatrix.ts','utf8');const block=s.slice(s.indexOf('export function normalizeQaRunRequestV2'),s.indexOf('export function normalizeQaRunRequestV3'));assert.match(block,/captureScreenshots:/);});

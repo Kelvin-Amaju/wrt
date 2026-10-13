@@ -1,0 +1,21 @@
+appId: com.orbitqa.desktop
+productName: OrbitQA Desktop
+asar: true
+
+directories:
+  output: release
+
+files:
+  - dist/**/*
+  - electron/**/*
+  - electron/mandatory-interaction-delay.cjs
+  - package.json
+  - "!electron/**/*.test.cjs"
+  - "!electron/**/__snapshots__/**"
+
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  artifactName: "OrbitQA-Desktop-v${version}-portable.${ext}"

@@ -1,0 +1,5 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');
+const main=fs.readFileSync('electron/main.cjs','utf8');const preload=fs.readFileSync('electron/preload.cjs','utf8');const app=fs.readFileSync('src/App.tsx','utf8');const page=fs.readFileSync('src/pages/Scheduler.tsx','utf8');
+test('scheduler IPC surface is registered end to end',()=>{for(const channel of ['scheduler:list','scheduler:save','scheduler:delete','scheduler:setEnabled','scheduler:runNow']){assert.match(main,new RegExp(channel.replace(':','\\:')));assert.match(preload,new RegExp(channel.replace(':','\\:')));}});
+test('scheduler page replaces placeholder and exposes recurrence modes',()=>{assert.match(app,/page === 'scheduler' \? <Scheduler/);for(const label of ['One time','Daily','Weekdays','Weekly','Monthly','Interval'])assert.ok(page.includes(label));});
+test('scheduler excludes recurring public engagement actions',()=>{assert.doesNotMatch(page,/favorite-track|follow-artist|like-action|comment-submit|follow-toggle/);assert.match(page,/Public engagement is not scheduled here/);});

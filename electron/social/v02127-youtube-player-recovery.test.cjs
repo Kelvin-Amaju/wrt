@@ -1,0 +1,10 @@
+const test=require('node:test');const assert=require('node:assert/strict');const {chromium}=require('playwright');const {_test}=require('./social-runner.cjs');
+async function withBrowser(fn){const browser=await chromium.launch({headless:true,executablePath:'/usr/bin/chromium',args:['--no-sandbox','--disable-dev-shm-usage']});try{return await fn(browser);}finally{await browser.close();}}
+test('v0.21.27 Chromium integration recovers a YouTube-style player error before observation',async()=>withBrowser(async browser=>{
+  const context=await browser.newContext();const page=await context.newPage();let reloads=0;
+  const errorHtml='<!doctype html><body><div id="movie_player" class="html5-video-player playback-error"><div class="ytp-error"><div class="ytp-error-content">Something went wrong. Refresh or try again later.</div></div></div></body>';
+  const healthyHtml='<!doctype html><body><div id="movie_player" class="html5-video-player"><video id="v"></video></div><script>const v=document.querySelector("#v");Object.defineProperties(v,{readyState:{value:4},error:{value:null},paused:{value:false,writable:true},ended:{value:false,writable:true},currentTime:{value:1,writable:true}});v.play=()=>Promise.resolve();</script></body>';
+  await page.setContent(errorHtml);const wrapped={locator:(...args)=>page.locator(...args),reload:async()=>{reloads++;await page.setContent(healthyHtml)},goto:async()=>{await page.setContent(healthyHtml)},waitForTimeout:(...args)=>page.waitForTimeout(...args)};
+  assert.equal(await _test.youtubePlayerError(wrapped),true);const session={page:wrapped,context:{}};const recovered=await _test.recoverTargetMedia(session,{platform:'youtube',targetUrl:'https://www.youtube.com/watch?v=demo',signal:new AbortController().signal,random:()=>0});
+  assert.equal(recovered.recovered,true);assert.equal(recovered.healthy,true);assert.equal(reloads,1);assert.equal(await _test.youtubePlayerError(wrapped),false);assert.equal(await _test.visiblePlayableMedia(wrapped),true);await context.close();
+}));

@@ -1,0 +1,3 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
+const root=path.join(__dirname,'..','..');const read=p=>fs.readFileSync(path.join(root,p),'utf8');
+test('v0.21.28 Social Hub exposes account/player diagnostics in source and packaged renderer',()=>{for(const file of ['src/pages/SocialHub.tsx','dist/assets/index-manual.js']){const text=read(file);assert.match(text,/SOCIAL WORKER DIAGNOSTICS/);assert.match(text,/Account \/ player health/);assert.match(text,/playabilityStatus/);assert.match(text,/Network errors/);}});
