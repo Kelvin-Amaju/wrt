@@ -82,6 +82,33 @@ export function findAndroidEmulationProfile(name?: string): AndroidEmulationProf
   return ANDROID_EMULATION_PROFILES.find((profile) => profile.name === name);
 }
 
+/**
+ * AVD names that are launched with retail device hardening enabled.
+ * Matching AVDs get -gpu host, retail ro.* build props, and browser-layer
+ * fingerprint hardening for the automation flag, runtime fingerprint and
+ * device identity gates. Must stay in sync with electron/device-hardening.cjs.
+ */
+export const REAL_DEVICE_AVDS: string[] = ['OrbitQA_Pixel_7_Real'];
+
+function normalizeAvdName(value: string): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\-.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** True when an AVD name is a hardened retail-device profile. */
+export function isHardenedAvd(name: string): boolean {
+  const key = normalizeAvdName(name);
+  if (!key) return false;
+  return REAL_DEVICE_AVDS.some((avd) => {
+    const candidate = normalizeAvdName(avd);
+    return candidate === key || key.includes('pixel 7') || key.includes('panther');
+  });
+}
+
 export const IOS_BROWSER_IDENTITIES: IosBrowserIdentity[] = ['safari-ios', 'chrome-ios'];
 export const IOS_ORIENTATIONS: IosOrientation[] = ['portrait', 'landscape'];
 

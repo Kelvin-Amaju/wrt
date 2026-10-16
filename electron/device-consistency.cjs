@@ -31,12 +31,23 @@ function buildDeviceExpectation(settings = {}, contextOptions = {}) {
     deviceScaleFactor: finiteNumber(contextOptions.deviceScaleFactor),
     hasTouch: typeof contextOptions.hasTouch === 'boolean' ? contextOptions.hasTouch : (family === 'android' || family === 'iphone' || family === 'ipad'),
     userAgent: contextOptions.userAgent || '',
+    // True when an AVD device-hardening profile is driving this work unit.
+    // Used only to phrase the automation-observability finding accurately.
+    hardened: settings.deviceHardened === true || contextOptions.deviceHardened === true,
   };
 }
 
 function buildRuntimeFidelity(expected = {}) {
   const mode = expected.mode || 'desktop';
   if (mode === 'android') {
+    if (expected.hardened) {
+      return {
+        level: 'hardened-android-runtime',
+        label: 'Hardened Android runtime',
+        description: 'Chrome runs inside an ADB-connected Android virtual device that reports retail build identity.',
+        limitations: ['Kernel-level emulator props (ro.kernel.qemu, goldfish/ranchu) remain visible to native apps.', 'Play Integrity STRONG is never satisfied on an emulator.'],
+      };
+    }
     return {
       level: 'native-android-runtime',
       label: 'Native Android runtime',
@@ -130,7 +141,7 @@ async function collectRuntimeIdentity(page) {
       locale: navigator.language,
       languages: Array.isArray(navigator.languages) ? [...navigator.languages] : [navigator.language].filter(Boolean),
       timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      webdriver: false,
+      webdriver: typeof navigator.webdriver === 'boolean' ? navigator.webdriver : null,
       hardwareConcurrency: Number.isFinite(navigator.hardwareConcurrency) ? navigator.hardwareConcurrency : null,
       deviceMemory: Number.isFinite(navigator.deviceMemory) ? navigator.deviceMemory : null,
       canvas,
@@ -176,6 +187,7 @@ function assessDeviceConsistency(expected, observed = {}, functional = {}) {
   const mobileAndroid = expected.family === 'android';
   const localIos = expected.family === 'iphone' || expected.family === 'ipad';
   const desktop = expected.family === 'desktop';
+  const hardened = expected.hardened === true;
   const ua = text(observed.userAgent);
   const platform = text(observed.platform);
 
@@ -187,7 +199,9 @@ function assessDeviceConsistency(expected, observed = {}, functional = {}) {
       true,
       'Android mobile browser identity',
       ua || 'Unavailable',
-      'Critical Android identity check. OrbitQA does not hide automation markers or forge unrelated hardware APIs.',
+      hardened
+        ? 'Critical Android identity check. Device hardening rewrites the device token to retail hardware while preserving the live Chrome version.'
+        : 'Critical Android identity check. OrbitQA does not hide automation markers or forge unrelated hardware APIs.',
     ));
   } else if (localIos) {
     const wantsChrome = expected.iosBrowser === 'chrome-ios';
@@ -224,7 +238,9 @@ function assessDeviceConsistency(expected, observed = {}, functional = {}) {
       false,
       'Linux/Android-like platform',
       platform || 'Unavailable',
-      'Platform is observed and reported; OrbitQA does not patch navigator.platform.',
+      hardened
+        ? 'Platform is patched to the retail Linux/ARM token by device hardening.'
+        : 'Platform is observed and reported; OrbitQA does not patch navigator.platform.',
       !/(Linux|Android)/i.test(platform) && expected.mode === 'android-emulation' ? 'expected-limitation' : '',
     ));
   } else if (localIos) {
@@ -355,9 +371,11 @@ function assessDeviceConsistency(expected, observed = {}, functional = {}) {
     'Runtime hardware exposure',
     hardwareObserved.length > 0 ? 'pass' : 'not-applicable',
     false,
-    'Browser/runtime native',
+    hardened ? 'Retail hardware profile' : 'Browser/runtime native',
     hardwareObserved.length > 0 ? hardwareObserved.join(' · ') : 'Unavailable',
-    'Observed only. OrbitQA does not invent CPU, memory, GPU, sensor, or other hardware values.',
+    hardened
+      ? 'Device hardening pins CPU/memory to the retail profile instead of exposing host values.'
+      : 'Observed only. OrbitQA does not invent CPU, memory, GPU, sensor, or other hardware values.',
   ));
 
   const canvasSupported = observed.canvas?.supported === true;
@@ -377,9 +395,11 @@ function assessDeviceConsistency(expected, observed = {}, functional = {}) {
     'WebGL native stability baseline',
     webglSupported && observed.webgl?.signature ? 'pass' : 'not-applicable',
     false,
-    'Browser/GPU native and stable within the worker environment',
+    hardened ? 'Retail GPU vendor and renderer' : 'Browser/GPU native and stable within the worker environment',
     webglSupported ? `${observed.webgl.vendor || 'vendor unavailable'} · ${observed.webgl.renderer || 'renderer unavailable'} · ${observed.webgl.signature}` : 'Unavailable',
-    'OrbitQA reports the browser/GPU-native WebGL environment and does not independently spoof vendor, renderer, extensions, or GPU limits.',
+    hardened
+      ? 'Device hardening rewrites only the WebGL vendor/renderer strings. Extensions, limits and the canvas result stay runtime-native and byte-stable.'
+      : 'OrbitQA reports the browser/GPU-native WebGL environment and does not independently spoof vendor, renderer, extensions, or GPU limits.',
   ));
 
   const webdriver = observed.webdriver;
@@ -388,9 +408,11 @@ function assessDeviceConsistency(expected, observed = {}, functional = {}) {
     'Automation observability',
     webdriver === true ? 'warning' : webdriver === false ? 'pass' : 'not-applicable',
     false,
-    'Reported truthfully',
+    hardened ? 'Hidden by device hardening' : 'Reported truthfully',
     webdriver == null ? 'Unavailable' : String(webdriver),
-    'Diagnostic only. OrbitQA reports navigator.webdriver and does not modify or hide it. Protected. Automation environment hidden successfully.',
+    hardened
+      ? 'Device hardening launches Chromium with --disable-blink-features=AutomationControlled, so navigator.webdriver reports false. ChromeDriver cdc_* globals are deleted and window.chrome.* stubs are restored.'
+      : 'Diagnostic only. OrbitQA reports navigator.webdriver and does not modify or hide it.',
     webdriver === true ? 'expected-limitation' : '',
   ));
 
@@ -446,6 +468,7 @@ function assessDeviceConsistency(expected, observed = {}, functional = {}) {
     blockingReasons: blocking.map((check) => check.label),
     mode: expected.mode,
     profile: expected.profile,
+    hardened,
     profileChecks,
     runtimeFacts,
     functionalCompatibility: {

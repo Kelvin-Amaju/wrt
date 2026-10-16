@@ -26,7 +26,7 @@ const HARDENING_CHECKS = Object.freeze([
 const REAL_DEVICE_PROFILES = Object.freeze({
   'pixel-7-panther': Object.freeze({
     id: 'pixel-7-panther',
-    avdNames: [DEFAULT_REAL_DEVICE_AVD, 'OrbitQA_Pixel7', 'Pixel_7_API_34'],
+    avdNames: [DEFAULT_REAL_DEVICE_AVD, 'OrbitQA_Pixel7', 'Pixel_7_API_34', 'Pixel_7_API_35'],
     match: ['pixel 7', 'pixel7', 'panther'],
     model: 'Pixel 7',
     brand: 'google',
@@ -55,7 +55,12 @@ const REAL_DEVICE_PROFILES = Object.freeze({
 const UA_DEVICE_RE = /(Linux; Android [\d.]+; )([^;)]+)((?: Build\/[^;)]+)?)(\))/;
 
 function normalise(value) {
-  return String(value == null ? '' : value).trim().toLowerCase();
+  return String(value == null ? '' : value)
+    .trim()
+    .toLowerCase()
+    .replace(/[_\-.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function findRealDeviceProfile(input) {
@@ -68,6 +73,10 @@ function findRealDeviceProfile(input) {
     if (profile.match.some((token) => key === token || key.includes(token))) return profile;
   }
   return null;
+}
+
+function isHardenedAvd(name) {
+  return Boolean(findRealDeviceProfile(name));
 }
 
 function resolveProfile(input) {
@@ -240,6 +249,7 @@ async function installDeviceHardening(target, profile) {
 /**
  * One-shot helper for browser factories.
  * Returns hardened contextOptions plus an afterCreate hook.
+ * Only fills viewport/deviceScaleFactor when the caller has not set them.
  */
 function prepareHardening(input = {}) {
   const profile = findRealDeviceProfile(input.avdName || input.deviceName || input.model);
@@ -252,8 +262,8 @@ function prepareHardening(input = {}) {
     contextOptions.userAgent = buildHardeningUserAgent(profile, contextOptions.userAgent);
     contextOptions.hasTouch = true;
     contextOptions.isMobile = true;
-    contextOptions.deviceScaleFactor = profile.screen.dpr;
-    contextOptions.viewport = { width: profile.screen.width, height: profile.screen.height };
+    if (contextOptions.deviceScaleFactor == null) contextOptions.deviceScaleFactor = profile.screen.dpr;
+    if (!contextOptions.viewport) contextOptions.viewport = { width: profile.screen.width, height: profile.screen.height };
   }
 
   return {
@@ -366,7 +376,9 @@ module.exports = {
   HARDENING_EVENT,
   HARDENING_CHECKS,
   REAL_DEVICE_PROFILES,
+  normalise,
   findRealDeviceProfile,
+  isHardenedAvd,
   resolveProfile,
   buildHardeningArgs,
   buildHardeningProps,

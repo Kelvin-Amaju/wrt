@@ -8,6 +8,7 @@ const {
   parseAvdList,
   parseAdbDevices,
   isSafeAvdName,
+  buildAvdLaunchArgs,
   createAndroidService,
 } = require('./android-service.cjs');
 
@@ -35,6 +36,49 @@ test('rejects unsafe AVD names', () => {
   assert.equal(isSafeAvdName('Pixel_9_API_36'), true);
   assert.equal(isSafeAvdName('Pixel 9; calc.exe'), false);
   assert.equal(isSafeAvdName('../Pixel'), false);
+});
+
+test('leaves a plain AVD on the original cold-start argument list', () => {
+  const { args, hardened } = buildAvdLaunchArgs('Pixel_9_API_36');
+  assert.equal(hardened, false);
+  assert.deepEqual(args, ['-avd', 'Pixel_9_API_36', '-no-snapshot-load', '-no-boot-anim']);
+});
+
+test('adds -gpu host and retail -prop pairs for a hardened AVD', () => {
+  const { args, hardened } = buildAvdLaunchArgs('OrbitQA_Pixel_7_Real');
+  assert.equal(hardened, true);
+  assert.deepEqual(args.slice(0, 4), ['-avd', 'OrbitQA_Pixel_7_Real', '-no-snapshot-load', '-no-boot-anim']);
+  assert.equal(args.includes('-gpu'), true);
+  assert.equal(args[args.indexOf('-gpu') + 1], 'host');
+  assert.equal(args.includes('-prop'), true);
+  const propValues = args.filter((_, index) => args[index - 1] === '-prop');
+  assert.equal(propValues.some((value) => value === 'ro.product.model=Pixel 7'), true);
+  const fingerprint = propValues.find((value) => value.startsWith('ro.build.fingerprint='));
+  assert.ok(fingerprint && !/sdk_gphone|generic/.test(fingerprint));
+});
+
+test('hardening props never leak into a non-matching AVD launch', async () => {
+  const calls = [];
+  let launched = false;
+  const fakeExecFile = async (file, args) => {
+    if (args[0] === '-list-avds') return { stdout: 'Pixel_9_API_36\n', stderr: '' };
+    if (args[0] === 'devices') return { stdout: launched ? 'List of devices attached\nemulator-5554\tdevice\n' : 'List of devices attached\n', stderr: '' };
+    if (args.includes('getprop')) return { stdout: '1\n', stderr: '' };
+    if (args.includes('pm') && args.includes('path')) return { stdout: 'package:/data/app/com.android.chrome/base.apk\n', stderr: '' };
+    return { stdout: '', stderr: '' };
+  };
+  const service = createAndroidService({
+    env: { ANDROID_SDK_ROOT: 'C:\\Android\\Sdk' },
+    existsSync: () => true,
+    execFileAsync: fakeExecFile,
+    spawn: (file, args, options) => { calls.push({ file, args, options }); launched = true; return { unref() {} }; },
+    sleep: async () => undefined,
+  });
+
+  await service.launchAvd('Pixel_9_API_36');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.includes('-gpu'), false);
+  assert.equal(calls[0].args.includes('-prop'), false);
 });
 
 test('launches an AVD with argument arrays and never shell text', async () => {
@@ -209,10 +253,10 @@ test('launches Android AVD with cold-start-safe arguments', async () => {
   const calls = [];
   let launched = false;
   const fakeExecFile = async (file, args) => {
-    if (args[0] === '-list-avds') return { stdout: 'Pixel_7_API_35\n', stderr: '' };
+    if (args[0] === '-list-avds') return { stdout: 'Pixel_9_API_36\n', stderr: '' };
     if (args[0] === 'devices') return { stdout: launched ? 'List of devices attached\nemulator-5554\tdevice\n' : 'List of devices attached\n', stderr: '' };
     if (args.includes('getprop')) return { stdout: '1\n', stderr: '' };
-    if (args.includes('emu') && args.includes('avd') && args.includes('name')) return { stdout: 'Pixel_7_API_35\nOK\n', stderr: '' };
+    if (args.includes('emu') && args.includes('avd') && args.includes('name')) return { stdout: 'Pixel_9_API_36\nOK\n', stderr: '' };
     if (args.includes('pm') && args.includes('path')) return { stdout: 'package:/data/app/com.android.chrome/base.apk\n', stderr: '' };
     return { stdout: '', stderr: '' };
   };
@@ -224,7 +268,7 @@ test('launches Android AVD with cold-start-safe arguments', async () => {
     sleep: async () => undefined,
   });
 
-  await service.launchAvd('Pixel_7_API_35');
+  await service.launchAvd('Pixel_9_API_36');
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args.includes('-no-snapshot-load'), true);

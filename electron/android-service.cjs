@@ -74,6 +74,23 @@ function isSafeAvdName(name) {
   return typeof name === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(name);
 }
 
+/**
+ * Build the emulator argv for an AVD.
+ * Hardened (retail-spoofing) AVDs additionally receive -gpu host and the
+ * ro.* build props so the guest reports retail hardware. Non-hardened AVDs
+ * keep the exact original argument list.
+ */
+function buildAvdLaunchArgs(name) {
+  const args = ["-avd", name, "-no-snapshot-load", "-no-boot-anim"];
+  const profile = deviceHardening.findRealDeviceProfile(name);
+  if (!profile) return { args, profile: null, hardened: false };
+  args.push("-gpu", profile.gpu || "host");
+  for (const prop of deviceHardening.buildHardeningProps(profile)) {
+    args.push("-prop", prop);
+  }
+  return { args, profile, hardened: true };
+}
+
 function createAndroidService(options = {}) {
   const env = options.env || process.env;
   const existsSync = options.existsSync || fs.existsSync;
@@ -261,20 +278,10 @@ function createAndroidService(options = {}) {
       throw new Error(
         "ADB is unavailable. Install Android SDK Platform Tools.",
       );
-    const profile = deviceHardening.findRealDeviceProfile(name);
-    const args = [
-      "-avd",
-      name,
-      "-no-snapshot-load",
-      "-no-boot-anim",
-      "-gpu",
-      "host",
-    ];
-    if (profile) {
-      for (const prop of deviceHardening.buildHardeningProps(profile)) {
-        args.push("-prop", prop);
-      }
-    }
+
+    // Hardened AVDs get -gpu host plus retail build props. Everything else is
+    // byte-for-byte the original cold-start-safe argument list.
+    const { args, hardened } = buildAvdLaunchArgs(name);
 
     const avds = await listAvds();
     if (!avds.includes(name))
@@ -303,24 +310,21 @@ function createAndroidService(options = {}) {
             serial: existing.serial,
             state: "ready",
             alreadyRunning: true,
+            hardened,
           };
       }
     }
 
-    const child = spawn(
-      status.emulatorPath,
-      ["-avd", name, "-no-snapshot-load", "-no-boot-anim"],
-      {
-        // Keep the emulator in the same foreground process model as a successful
-        // manual launch. On Windows, detaching the emulator can make startup
-        // failures invisible and can prevent the virtual device from ever
-        // registering with the ADB server owned by this session.
-        detached: false,
-        stdio: "ignore",
-        windowsHide: false,
-        shell: false,
-      },
-    );
+    const child = spawn(status.emulatorPath, args, {
+      // Keep the emulator in the same foreground process model as a successful
+      // manual launch. On Windows, detaching the emulator can make startup
+      // failures invisible and can prevent the virtual device from ever
+      // registering with the ADB server owned by this session.
+      detached: false,
+      stdio: "ignore",
+      windowsHide: false,
+      shell: false,
+    });
 
     const readyPromise = waitForReady(180000, name);
     const earlyExitPromise =
@@ -350,7 +354,7 @@ function createAndroidService(options = {}) {
       : await readyPromise;
 
     if (typeof child.unref === "function") child.unref();
-    return result;
+    return { ...result, hardened };
   }
 
   async function stopAvd(serial) {
@@ -381,5 +385,6 @@ module.exports = {
   parseAvdList,
   parseAdbDevices,
   isSafeAvdName,
+  buildAvdLaunchArgs,
   createAndroidService,
 };

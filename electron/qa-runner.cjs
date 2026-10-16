@@ -23,6 +23,7 @@ const { buildConsistentWorkerContext, validateWorkerContext } = require('./worke
 const { backgroundWindowArgs, concealBackgroundWorkerWindow } = require('./background-window.cjs');
 const { synchronizeProxyTimezone } = require('./proxy-timezone-consistency.cjs');
 const {waitBeforePageInteraction}=require('./mandatory-interaction-delay.cjs');
+const deviceHardening = require('./device-hardening.cjs');
 
 const SUPPORTED_BROWSERS = new Set(['chrome-installed', 'brave-installed', 'chromium', 'firefox', 'webkit']);
 const SUPPORTED_DEVICE_MODES = new Set(['desktop', 'android', 'ios-emulation', 'real-ios']);
@@ -675,6 +676,8 @@ function settingsForWorkUnit(normalized, workUnit) {
     sessionDurationExplicit: true,
     proxySource: workUnit.proxySource,
     allowSlowProxies: ['rotating', 'static', 'smart-mix'].includes(workUnit.proxySource),
+    // Drives the hardened wording in device-consistency findings.
+    deviceHardened: kind === 'android-avd' && Boolean(deviceHardening.findRealDeviceProfile(workUnit.androidAvdName)),
   };
 }
 
@@ -788,6 +791,7 @@ function normalizeQaRunRequest(input) {
     proxySource,
     allowSlowProxies,
     steps,
+    deviceHardened: deviceMode === 'android' && Boolean(deviceHardening.findRealDeviceProfile(deviceName)),
   };
 }
 
@@ -1303,7 +1307,7 @@ async function executeAndroidRun({ runId, normalized, push, screenshotDir, playw
   if (!androidService) throw new Error('Android service is unavailable');
   throwIfRunAborted(signal);
   push({ type: 'log', message: `Preparing Android virtual device: ${normalized.deviceName}` });
-  await androidService.launchAvd(normalized.deviceName);
+  const launchInfo = await androidService.launchAvd(normalized.deviceName);
   throwIfRunAborted(signal);
 
   if (!playwright._android) throw new Error('The installed browser runtime does not include Android automation support');
@@ -1312,6 +1316,7 @@ async function executeAndroidRun({ runId, normalized, push, screenshotDir, playw
   if (devices.length > 1) throw new Error('More than one Android device is connected. Keep only one emulator/device connected for this milestone.');
 
   const device = devices[0];
+  const hardeningProfile = deviceHardening.findRealDeviceProfile(normalized.deviceName);
   let context;
   let unregisterDeviceResource = runResourceTracker?.register?.(runId, {
     label:'android-device',
@@ -1328,10 +1333,13 @@ async function executeAndroidRun({ runId, normalized, push, screenshotDir, playw
     throwIfRunAborted(signal);
     push({ type: 'session-start', sessionId: 1, status: 'running', message: `Android session started on ${normalized.deviceName}` });
     await device.shell('am force-stop com.android.chrome').catch(() => undefined);
-    context = await device.launchBrowser();
+    context = await device.launchBrowser(
+      hardeningProfile ? { args: deviceHardening.buildHardeningArgs(hardeningProfile) } : {},
+    );
     const trackedAndroidContext = context;
     unregisterContextResource = runResourceTracker?.register?.(runId, { label:'android-context', close:() => trackedAndroidContext.close(), forceClose:async() => { await device.shell?.('am force-stop com.android.chrome').catch(() => undefined); await trackedAndroidContext.close?.().catch(() => undefined); } }) || null;
     const page = await createPrivacyReadyPage(context, normalized.privacy.strictMode);
+    if (hardeningProfile) await deviceHardening.installDeviceHardening(context, hardeningProfile);
     page.setDefaultTimeout(10000);
 
     const navigationStarted = Date.now();
@@ -1357,6 +1365,18 @@ async function executeAndroidRun({ runId, normalized, push, screenshotDir, playw
       throw new Error(`Strict Privacy Mode blocked the session: ${privacyReport.blockingReasons.join(', ')}`);
     }
 
+    if (hardeningProfile) {
+      const hardeningReport = await runNavigationResilientProbe(page, 'Android device hardening diagnostics', push, null, () => deviceHardening.collectHardeningReport(page, hardeningProfile));
+      push({
+        type: 'device-hardening',
+        sessionId: 1,
+        message: hardeningReport.passed
+          ? 'Device hardening passed all three checks'
+          : `Device hardening incomplete: ${hardeningReport.checks.filter((check) => !check.pass).map((check) => check.id).join(', ')}`,
+        deviceHardening: hardeningReport,
+      });
+    }
+
     for (let index = 0; index < normalized.steps.length; index += 1) {
       const step = normalized.steps[index];
       push({ type: 'step', sessionId: 1, stepId: step.id, message: `Running ${step.type} step` });
@@ -1380,6 +1400,7 @@ async function executeAndroidRun({ runId, normalized, push, screenshotDir, playw
     unregisterContextResource?.();
     await device.close().catch(() => undefined);
     unregisterDeviceResource?.();
+    void launchInfo;
   }
 }
 
@@ -1610,6 +1631,7 @@ async function executeAndroidAvdMatrixWorkUnit({
   const launchInfo = await androidService.launchAvd(settings.deviceName);
   const serial = launchInfo?.serial;
   if (!serial) throw new Error(`Android virtual device ${settings.deviceName} did not return an ADB serial`);
+  const hardeningProfile = deviceHardening.findRealDeviceProfile(settings.deviceName);
   const device = await findAndroidDeviceBySerial(playwright, serial);
   let context;
   let lifetime;
@@ -1629,7 +1651,11 @@ async function executeAndroidAvdMatrixWorkUnit({
   try {
     throwIfRunAborted(signal);
     await device.shell?.('am force-stop com.android.chrome').catch(() => undefined);
-    context = await device.launchBrowser();
+    // Hardened AVDs launch Chrome on the guest with the AutomationControlled blink
+    // feature disabled. Non-hardened AVDs keep the original bare launch.
+    context = await device.launchBrowser(
+      hardeningProfile ? { args: deviceHardening.buildHardeningArgs(hardeningProfile) } : {},
+    );
     if (workUnit.useCookies === true && cookieStore?.pickAny && typeof context.addCookies === 'function') {
       const selectedCookie = cookieStore.pickAny();
       if (selectedCookie?.cookie) {
@@ -1644,6 +1670,10 @@ async function executeAndroidAvdMatrixWorkUnit({
     lifetime = sessionLifetimeFactory({ context, durationMs:settings.sessionDurationSeconds * 1000, signal });
     lifetime.throwIfExpired?.();
     let page = await createPrivacyReadyPage(context, settings.privacy.strictMode);
+    // Register the hardening init script after the privacy guard so it wins the
+    // last-write for navigator.webdriver, UA and WebGL. It applies to the next
+    // navigation, which is the target load below.
+    if (hardeningProfile) await deviceHardening.installDeviceHardening(context, hardeningProfile);
     page.setDefaultTimeout?.(10000);
     let resolver = createBlockingSurfaceResolver({ page, lifetime, log:(message)=>pushWork({ type:'log', message }) });
     const indicatorEnabled = normalized.interactionIndicator && !normalized.headless;
@@ -1698,6 +1728,18 @@ async function executeAndroidAvdMatrixWorkUnit({
       identityDiagnostics: identityReport,
     });
     if (identityReport.blocked) throw new Error(`Device identity consistency blocked this work unit: ${identityReport.blockingReasons.join(', ')}`);
+
+    if (hardeningProfile) {
+      const hardeningReport = await runNavigationResilientProbe(page, 'Android AVD device hardening diagnostics', pushWork, lifetime, () => deviceHardening.collectHardeningReport(page, hardeningProfile));
+      const failedChecks = hardeningReport.checks.filter((check) => !check.pass).map((check) => check.id);
+      pushWork({
+        type: deviceHardening.HARDENING_EVENT,
+        message: hardeningReport.passed
+          ? 'Device hardening passed all three checks (automation flag, runtime fingerprint, device identity)'
+          : `Device hardening incomplete: ${failedChecks.join(', ')}`,
+        deviceHardening: hardeningReport,
+      });
+    }
 
     await executeConfiguredBehavior({ settings, normalized, page, context, workUnit, sessionId, screenshotDir, pushWork, lifetime, resolver, indicator, indicatorMode, pacing, signal });
 

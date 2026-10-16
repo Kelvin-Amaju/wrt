@@ -10,6 +10,7 @@ const { profileForCountry }=require('../social/geo-profile.cjs');
 const { buildConsistentWorkerContext, validateWorkerContext }=require('../worker-context-policy.cjs');
 const { synchronizeProxyTimezone }=require('../proxy-timezone-consistency.cjs');
 const { buildDeviceExpectation, collectRuntimeIdentity, assessDeviceConsistency, compareGraphicsStability }=require('../device-consistency.cjs');
+const deviceHardening=require('../device-hardening.cjs');
 const { createProfileLockManager }=require('./profile-lock-manager.cjs');
 const {normalizeChromeProfileShutdownState}=require('../chrome-profile-state.cjs');
 
@@ -391,11 +392,18 @@ function createStreamingBrowserFactory({
           exposeProxyGeolocation:false,
         });
         const contextOptions=resolvedWorkerContext.options;
-        // Installed-Chromium mobile Streaming remains explicitly a compatibility runtime.
-        // Preserve its native UA instead of claiming to be physical Android/iOS hardware;
-        // viewport/touch/DPR are still selected-device accurate and diagnostics report this limitation.
-        if(browserPolicy?.compatibilityMode) delete contextOptions.userAgent;
-        const contextValidation=validateWorkerContext({profile,deviceMode,contextOptions,allocation:geoConsistencyFromProxy&&allocation?.geoVerified===true?allocation:null,compatibilityMode:Boolean(browserPolicy?.compatibilityMode)});
+        // Installed-Chromium mobile Streaming is a compatibility runtime. Device hardening
+        // upgrades it to a retail Android identity when the selected profile is a known
+        // retail device; otherwise the native UA is preserved exactly as before.
+        const hardening=deviceHardening.prepareHardening({
+          deviceMode,
+          deviceName:workUnit?.deviceProfile,
+          avdName:workUnit?.androidAvdName,
+          contextOptions,
+        });
+        Object.assign(contextOptions,hardening.contextOptions);
+        if(browserPolicy?.compatibilityMode && !hardening.active) delete contextOptions.userAgent;
+        const contextValidation=validateWorkerContext({profile,deviceMode,contextOptions,allocation:geoConsistencyFromProxy&&allocation?.geoVerified===true?allocation:null,compatibilityMode:Boolean(browserPolicy?.compatibilityMode)&&!hardening.active});
         if(!contextValidation.ok) throw new Error(`Streaming worker identity is inconsistent: ${contextValidation.issues.join(', ')}`);
         const authorizedSession=(!restoreStoredSession||ignoreStoredSession)?{kind:'none',storageState:null,cookies:[]}:parseAuthorizedSessionState(account.sessionSecret,account.platform);
         const profileDir=browserEngine==='chromium'?String(profileDirOverride||persistentProfileDir(profileBaseDir,account)):'';
@@ -440,6 +448,7 @@ function createStreamingBrowserFactory({
           // Saved snapshots remain available for non-persistent/recovery contexts below.
           const existingPages=typeof context.pages==='function'?context.pages():[];
           await installStrictPrivacyGuard(context,true);
+          await hardening.afterCreate(context);
           if(typeof context.newPage==='function'){
             page=await context.newPage();
             for(const existingPage of existingPages||[]){
@@ -465,6 +474,7 @@ function createStreamingBrowserFactory({
           if(authorizedSession.storageState)contextOptions.storageState=authorizedSession.storageState;
           context=await browser.newContext(contextOptions);
           await installStrictPrivacyGuard(context,true);
+          await hardening.afterCreate(context);
           if(authorizedSession.cookies.length&&typeof context.addCookies==='function')await context.addCookies(authorizedSession.cookies);
           page=await context.newPage();
         }
@@ -516,6 +526,7 @@ function createStreamingBrowserFactory({
           browser:browserPolicy?.browserFamily||'chromium',
           locale:contextOptions.locale||'',
           timezoneId:contextOptions.timezoneId||'',
+          deviceHardened:hardening.active,
         };
         const identityBaseline=await collectRuntimeIdentity(page).catch(()=>null);
         const identityReport=identityBaseline?assessDeviceConsistency(buildDeviceExpectation(identitySettings,contextOptions),identityBaseline):null;
@@ -525,6 +536,7 @@ function createStreamingBrowserFactory({
         return {
           page, context, browser, allocation, privacyReport, identityReport, workerGeo:resolvedWorkerContext.geo, contextValidation, browserPolicy, initialRoute,
           persistentProfile:shouldUsePersistentProfile, profileDir:shouldUsePersistentProfile?profileDir:undefined,
+          deviceHardening:hardening.active?hardening.profile:null,
           async refreshProxyRoute(){return await verifyCurrentProxyRoute({isolated:true});},
           async revalidateWorkerIdentity(){
             const route=proxyRequired?await verifyCurrentProxyRoute({isolated:true}):{proxiedIp:'',error:null};
