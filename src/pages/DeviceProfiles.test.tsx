@@ -5,9 +5,13 @@ import { DeviceProfiles } from './DeviceProfiles';
 const getMobileStatus = vi.fn();
 const launchAvd = vi.fn();
 const stopAvd = vi.fn();
+const startAndroidSetup = vi.fn();
+const getAndroidSetupState = vi.fn();
 
 beforeEach(() => {
   getMobileStatus.mockReset();
+  startAndroidSetup.mockReset().mockResolvedValue({ running: true, phase: 'installing', log: 'Downloading Java...', error: null });
+  getAndroidSetupState.mockReset().mockResolvedValue({ running: false, phase: 'idle', log: '', error: null });
   getMobileStatus.mockResolvedValue({
     sdkPath: 'C:\\Users\\tester\\AppData\\Local\\Android\\Sdk',
     adbPath: 'C:\\Users\\tester\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe',
@@ -20,11 +24,23 @@ beforeEach(() => {
   });
   Object.defineProperty(window, 'orbitqa', {
     configurable: true,
-    value: { getMobileStatus, listAvds: vi.fn(), launchAvd, stopAvd },
+    value: { getMobileStatus, listAvds: vi.fn(), launchAvd, stopAvd, startAndroidSetup, getAndroidSetupState },
   });
 });
 
 describe('DeviceProfiles', () => {
+  it('requires license consent before starting setup and displays progress', async () => {
+    render(<DeviceProfiles />);
+    fireEvent.click(screen.getByRole('button', { name: 'Android Virtual Device' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh Devices' })).toBeEnabled());
+    const button = screen.getByRole('button', { name: 'Set up Android Emulator' });
+    expect(button).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /I accept the Android SDK/ }));
+    fireEvent.click(button);
+    await waitFor(() => expect(startAndroidSetup).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole('log')).toHaveTextContent('Downloading Java...');
+    expect(screen.getByRole('button', { name: 'Setting up Android...' })).toBeDisabled();
+  });
   it('shows desktop, Android, local iOS, and real iOS tabs', () => {
     render(<DeviceProfiles />);
     expect(screen.getByRole('button', { name: 'Desktop' })).toBeInTheDocument();

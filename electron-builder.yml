@@ -1,6 +1,12 @@
 appId: com.orbitqa.desktop
 productName: OrbitQA Desktop
 asar: true
+extraResources:
+  - from: tools
+    to: android-setup
+    filter:
+      - setup-android.ps1
+      - create-real-device-avd.ps1
 
 directories:
   output: release

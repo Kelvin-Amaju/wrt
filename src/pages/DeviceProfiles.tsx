@@ -21,6 +21,45 @@ export function DeviceProfiles() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [setup, setSetup] = useState<{ running: boolean; phase: string; log: string; error: string | null }>({ running: false, phase: 'idle', log: '', error: null });
+  const [acceptTerms, setAcceptTerms] = useState(false);
+
+  useEffect(() => {
+    const bridge = window.orbitqa;
+    if (tab !== 'android' || !bridge?.getAndroidSetupState) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let wasRunning = false;
+    async function poll() {
+      try {
+        const next = await bridge!.getAndroidSetupState();
+        if (disposed) return;
+        setSetup(next);
+        if (wasRunning && !next.running) {
+          const mobile = await bridge!.getMobileStatus();
+          if (disposed) return;
+          setStatus(mobile);
+          setSelectedAvd(mobile.avds[0] || '');
+        }
+        wasRunning = next.running;
+      } catch (cause) {
+        if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
+      }
+      if (!disposed) timer = setTimeout(() => void poll(), 1000);
+    }
+    void poll();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [tab]);
+
+  async function setupAndroid() {
+    if (!acceptTerms || !window.orbitqa?.startAndroidSetup) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try { setSetup(await window.orbitqa.startAndroidSetup()); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  }
 
   const runningEmulator = useMemo(
     () => status.devices.find((device) => device.serial.startsWith('emulator-') && device.state === 'device'),
@@ -138,7 +177,7 @@ export function DeviceProfiles() {
           <article className="panel android-status-panel">
             <div className="panel__header">
               <div><span className="section-kicker">REAL VIRTUAL PHONE</span><h3>Android SDK & emulator</h3></div>
-              <button className="secondary-button" type="button" onClick={() => void refreshAndroid()} disabled={busy}>Refresh Devices</button>
+              <button className="secondary-button" type="button" onClick={() => void refreshAndroid()} disabled={busy || setup.running}>Refresh Devices</button>
             </div>
 
             <div className="mobile-status-grid">
@@ -153,12 +192,12 @@ export function DeviceProfiles() {
             {!status.sdkPath ? (
               <div className="setup-card">
                 <strong>Android setup required</strong>
-                <p>Install Android Studio, Android SDK Platform Tools, Android Emulator, then create one virtual device in Device Manager. Return here and press Refresh Devices.</p>
+                <p>Use the setup below to install the tools and create a virtual phone. Android Studio is not required.</p>
               </div>
             ) : status.avds.length === 0 ? (
               <div className="setup-card">
                 <strong>No Android virtual devices found</strong>
-                <p>Create an Android virtual device by running <code>powershell -ExecutionPolicy Bypass -File tools/create-real-device-avd.ps1</code> from the project folder, then refresh devices.</p>
+                <p>Use the setup below to download the Android image and create your virtual phone.</p>
               </div>
             ) : (
               <div className="avd-control-row">
@@ -168,11 +207,21 @@ export function DeviceProfiles() {
                     {status.avds.map((avd) => <option key={avd} value={avd}>{avd}</option>)}
                   </select>
                 </label>
-                <button className="primary-button" type="button" onClick={() => void launchSelectedAvd()} disabled={busy || !selectedAvd}>Launch Virtual Phone</button>
-                <button className="danger-button" type="button" onClick={() => void stopRunningAvd()} disabled={busy || !runningEmulator}>Stop Virtual Phone</button>
+                <button className="primary-button" type="button" onClick={() => void launchSelectedAvd()} disabled={busy || setup.running || !selectedAvd}>Launch Virtual Phone</button>
+                <button className="danger-button" type="button" onClick={() => void stopRunningAvd()} disabled={busy || setup.running || !runningEmulator}>Stop Virtual Phone</button>
               </div>
             )}
 
+            <div className="setup-card">
+              <strong>Set up Android Emulator</strong>
+              <p>Downloads Java, Android tools and a system image, then creates OrbitQA_Pixel_7_Real. Requires internet and several GB of free space. Existing virtual phones are preserved.</p>
+              <p>If acceleration is unavailable, enable CPU virtualization in BIOS/UEFI and Windows Hypervisor Platform in Windows Features, then restart Windows.</p>
+              <label className="check-row"><input type="checkbox" checked={acceptTerms} disabled={setup.running} onChange={(event) => setAcceptTerms(event.target.checked)} /><span>I accept the Android SDK license terms at https://developer.android.com/studio/terms and authorize downloading the required components.</span></label>
+              <button className="primary-button" type="button" disabled={busy || setup.running || !acceptTerms} onClick={() => void setupAndroid()}>{setup.running ? 'Setting up Android...' : setup.phase === 'failed' ? 'Retry Android Setup' : 'Set up Android Emulator'}</button>
+              {setup.log && <pre aria-label="Android setup progress" role="log" style={{ maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{setup.log}</pre>}
+              {setup.error && <div className="run-error" role="alert">{setup.error}</div>}
+              {setup.phase === 'complete' && <p role="status">Installation complete. Check the log for any virtualization steps, then launch your virtual phone.</p>}
+            </div>
             {message && <div className="inline-message inline-message--ok">{message}</div>}
             {error && <div className="run-error" role="alert">{error}</div>}
           </article>

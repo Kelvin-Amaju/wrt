@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('orbitqa', {
   setScheduledTaskEnabled: (id, enabled) => ipcRenderer.invoke('scheduler:setEnabled', id, enabled),
   runScheduledTaskNow: (id) => ipcRenderer.invoke('scheduler:runNow', id),
   getMobileStatus: () => ipcRenderer.invoke('mobile:getStatus'),
+  startAndroidSetup: () => ipcRenderer.invoke('mobile:startSetup'),
+  getAndroidSetupState: () => ipcRenderer.invoke('mobile:getSetupState'),
   listAvds: () => ipcRenderer.invoke('mobile:listAvds'),
   launchAvd: (name) => ipcRenderer.invoke('mobile:launchAvd', name),
   stopAvd: (serial) => ipcRenderer.invoke('mobile:stopAvd', serial),

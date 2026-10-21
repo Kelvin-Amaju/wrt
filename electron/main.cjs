@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog, powerSaveBlocke
 const path = require('node:path');
 const { executeQaRun, normalizeQaRunRequest } = require('./qa-runner.cjs');
 const { createAndroidService } = require('./android-service.cjs');
+const { createAndroidSetup } = require('./android-setup.cjs');
 const { createRealIosProvider } = require('./real-ios-provider.cjs');
 const { createRealIosService } = require('./real-ios-service.cjs');
 const { createProxyStore } = require('./proxy-store.cjs');
@@ -80,6 +81,9 @@ const catalogOperationControllers = new Map();
 const catalogFetchCache = new Map();
 let quittingAfterPause = false;
 const androidService = createAndroidService();
+const androidSetup = createAndroidSetup({ scriptPath: app.isPackaged
+  ? path.join(process.resourcesPath, 'android-setup', 'setup-android.ps1')
+  : path.join(__dirname, '..', 'tools', 'setup-android.ps1') });
 const guardedFetch = createGuardedFetch(global.fetch);
 
 function getBrowserRuntimeStatus() {
@@ -143,6 +147,8 @@ function broadcastSocialEvent(payload) {
 
 ipcMain.handle('app:getInfo', () => ({ name: 'OrbitQA Desktop', version: app.getVersion(), platform: process.platform }));
 ipcMain.handle('mobile:getStatus', () => androidService.getStatus());
+ipcMain.handle('mobile:startSetup', () => androidSetup.start());
+ipcMain.handle('mobile:getSetupState', () => androidSetup.getState());
 ipcMain.handle('mobile:listAvds', () => androidService.listAvds());
 ipcMain.handle('mobile:launchAvd', (_event, name) => androidService.launchAvd(String(name || '')));
 ipcMain.handle('mobile:stopAvd', (_event, serial) => androidService.stopAvd(serial ? String(serial) : undefined));

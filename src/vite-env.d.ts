@@ -30,6 +30,8 @@ declare global {
         platform: string;
       }>;
       getMobileStatus: () => Promise<MobileStatus>;
+      startAndroidSetup: () => Promise<{ running: boolean; phase: string; log: string; error: string | null }>;
+      getAndroidSetupState: () => Promise<{ running: boolean; phase: string; log: string; error: string | null }>;
       listAvds: () => Promise<string[]>;
       launchAvd: (name: string) => Promise<{ serial: string; state: string; alreadyRunning?: boolean }>;
       stopAvd: (serial?: string) => Promise<{ serial: string; state: string }>;

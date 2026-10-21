@@ -35,6 +35,16 @@ function Get-SdkRoot {
   throw 'Android SDK not found. Set ANDROID_SDK_ROOT or ANDROID_HOME.'
 }
 
+# Windows PowerShell treats native stderr warnings as errors under Stop.
+# Keep the output, and use the tool's exit code to determine success.
+function Invoke-AndroidTool {
+  param([string]$Tool, [string[]]$ToolArgs, [string]$InputText)
+  $ErrorActionPreference = 'Continue'
+  if ($InputText) { $InputText | & $Tool @ToolArgs 2>&1 }
+  else { & $Tool @ToolArgs 2>&1 }
+  $global:LASTEXITCODE = $LASTEXITCODE
+}
+
 $sdk = Get-SdkRoot
 $bin = Join-Path $sdk 'cmdline-tools\latest\bin'
 $sdkman = Join-Path $bin 'sdkmanager.bat'
@@ -58,11 +68,13 @@ if (-not $env:JAVA_HOME) {
 # --- 1. accept licences (this is what silently broke before) ---
 Write-Host 'Accepting SDK licences ...'
 $yes = (1..60 | ForEach-Object { 'y' }) -join "`n"
-$yes | & $sdkman --sdk_root="$sdk" --licenses 2>&1 | Out-Null
+Invoke-AndroidTool $sdkman @("--sdk_root=$sdk", '--licenses') $yes | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "SDK license acceptance failed (exit $LASTEXITCODE)." }
 
 # --- 2. confirm the remote index actually loads ---
 Write-Host 'Reading package index ...'
-$listOutput = (& $sdkman --sdk_root="$sdk" --list 2>&1 | Out-String)
+$listOutput = (Invoke-AndroidTool $sdkman @("--sdk_root=$sdk", '--list') | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "SDK package listing failed: $listOutput" }
 $available = [regex]::Matches($listOutput, '(?m)^\s*(system-images;[^|\s]+)\s*\|') |
   ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
 if (-not $available) {
@@ -85,31 +97,34 @@ Write-Host "Image : $Package"
 $api = ([regex]::Match($Package, 'android-(\d+)')).Groups[1].Value
 
 # --- 3. install image + platform + tools, with exit-code checks ---
-$installed = (& $sdkman --sdk_root="$sdk" --list_installed 2>&1 | Out-String)
+$installed = (Invoke-AndroidTool $sdkman @("--sdk_root=$sdk", '--list_installed') | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "SDK installed package listing failed: $installed" }
 foreach ($pkg in @($Package, "platforms;android-$api", 'emulator', 'platform-tools')) {
   if ($pkg -and $installed -notmatch [regex]::Escape($pkg)) {
     Write-Host "Installing $pkg ..."
-    & $sdkman --sdk_root="$sdk" --install $pkg 2>&1 | Out-Host
+    Invoke-AndroidTool $sdkman @("--sdk_root=$sdk", '--install', $pkg) | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "sdkmanager failed installing $pkg (exit $LASTEXITCODE)." }
   }
 }
 
-$verify = (& $sdkman --sdk_root="$sdk" --list_installed 2>&1 | Out-String)
+$verify = (Invoke-AndroidTool $sdkman @("--sdk_root=$sdk", '--list_installed') | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "SDK verification failed: $verify" }
 if ($verify -notmatch [regex]::Escape($Package)) { throw "$Package is still not installed after the install step." }
 Write-Host 'Image verified as installed.'
 
 # --- 4. create the AVD ---
-$existing = (& $avdman list avd 2>&1 | Out-String)
+$existing = (Invoke-AndroidTool $avdman @('list', 'avd') | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "AVD listing failed: $existing" }
 if ($existing -match "Name:\s+$([regex]::Escape($AvdName))") {
   if (-not $Force) { Write-Host "$AvdName already exists (use -Force to recreate)."; exit 0 }
   & $avdman delete avd -n $AvdName | Out-Null
 }
 
 Write-Host "Creating AVD $AvdName ..."
-'no' | & $avdman create avd -n $AvdName -k $Package -d $Device --force 2>&1 | Out-Host
+Invoke-AndroidTool $avdman @('create', 'avd', '-n', $AvdName, '-k', $Package, '-d', $Device, '--force') 'no' | Out-Host
 if ($LASTEXITCODE -ne 0) {
   Write-Warning "create avd failed with device id '$Device'; retrying without -d"
-  'no' | & $avdman create avd -n $AvdName -k $Package --force 2>&1 | Out-Host
+  Invoke-AndroidTool $avdman @('create', 'avd', '-n', $AvdName, '-k', $Package, '--force') 'no' | Out-Host
   if ($LASTEXITCODE -ne 0) { throw "avdmanager could not create $AvdName (exit $LASTEXITCODE)." }
 }
 
