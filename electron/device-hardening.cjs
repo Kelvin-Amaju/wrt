@@ -129,25 +129,49 @@ function hardeningInit(profile) {
   const w = typeof window !== 'undefined' ? window : globalThis;
   if (!w || !w.navigator) return;
   const n = w.navigator;
+  const navProto = Object.getPrototypeOf(n);
 
-  const def = (obj, prop, value) => {
+  /* ---- keep Function.prototype.toString looking native ---- */
+  const nativeToString = Function.prototype.toString;
+  const nativeSource = new WeakMap();
+  const markNative = (fn, name, kind) => {
+    try { nativeSource.set(fn, 'function ' + (kind === 'get' ? 'get ' : '') + name + '() { [native code] }'); } catch (_) {}
+    return fn;
+  };
+  const patchedToString = function toString() {
+    const source = nativeSource.get(this);
+    return source || nativeToString.call(this);
+  };
+  markNative(patchedToString, 'toString');
+  try { Function.prototype.toString = patchedToString; } catch (_) {}
+
+  const defineGetter = (target, prop, value) => {
+    if (!target) return false;
+    const getter = markNative(function () { return value; }, prop, 'get');
     try {
-      Object.defineProperty(obj, prop, { get: () => value, configurable: true });
+      const existing = Object.getOwnPropertyDescriptor(target, prop);
+      Object.defineProperty(target, prop, {
+        get: getter,
+        configurable: true,
+        enumerable: existing ? existing.enumerable : true,
+      });
+      return true;
     } catch (_) {
-      try { obj[prop] = value; } catch (__) {}
+      try { Object.defineProperty(n, prop, { get: getter, configurable: true }); return true; } catch (__) { return false; }
     }
   };
 
-  /* gate 1 - automation flag */
-  def(n, 'webdriver', false);
+  /* ---- gate 1: automation flag ---- */
+  defineGetter(navProto, 'webdriver', false);
 
   if (!w.chrome) w.chrome = {};
+  const stub = (name, impl) => markNative(impl, name);
   if (!w.chrome.runtime) {
     w.chrome.runtime = {
       id: undefined,
-      connect: () => {},
-      sendMessage: () => {},
-      onMessage: { addListener: () => {}, removeListener: () => {} }
+      connect: stub('connect', function () {}),
+      sendMessage: stub('sendMessage', function () {}),
+      onMessage: { addListener: stub('addListener', function () {}), removeListener: stub('removeListener', function () {}) }
     };
   }
   if (!w.chrome.app) {
@@ -157,13 +181,15 @@ function hardeningInit(profile) {
       RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
     };
   }
-  if (!w.chrome.csi) w.chrome.csi = () => ({ onloadT: 0, startE: Date.now(), pageT: 0, tran: 15 });
+  if (!w.chrome.csi) w.chrome.csi = stub('csi', function () { return { onloadT: 0, startE: Date.now(), pageT: 0, tran: 15 }; });
   if (!w.chrome.loadTimes) {
-    w.chrome.loadTimes = () => ({
-      requestTime: 0, startLoadTime: 0, commitLoadTime: 0, finishDocumentLoadTime: 0,
-      finishLoadTime: 0, firstPaintTime: 0, firstPaintAfterLoadTime: 0,
-      navigationType: 'Other', wasFetchedViaSpdy: true, wasNpnNegotiated: true,
-      npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2'
+    w.chrome.loadTimes = stub('loadTimes', function () {
+      return {
+        requestTime: 0, startLoadTime: 0, commitLoadTime: 0, finishDocumentLoadTime: 0,
+        finishLoadTime: 0, firstPaintTime: 0, firstPaintAfterLoadTime: 0,
+        navigationType: 'Other', wasFetchedViaSpdy: true, wasNpnNegotiated: true,
+        npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2'
+      };
     });
   }
   try {
@@ -172,65 +198,101 @@ function hardeningInit(profile) {
     }
   } catch (_) {}
 
-  /* gate 2 - runtime fingerprint */
-  def(n, 'hardwareConcurrency', profile.hardwareConcurrency);
-  def(n, 'deviceMemory', profile.deviceMemory);
-  def(n, 'maxTouchPoints', profile.maxTouchPoints);
-  def(n, 'platform', profile.platform);
+  /* ---- gate 2: runtime fingerprint ---- */
+  defineGetter(navProto, 'hardwareConcurrency', profile.hardwareConcurrency);
+  defineGetter(navProto, 'deviceMemory', profile.deviceMemory);
+  defineGetter(navProto, 'maxTouchPoints', profile.maxTouchPoints);
+  defineGetter(navProto, 'platform', profile.platform);
 
-  const patchGL = (proto) => {
+  const patchGetParameter = (proto) => {
     if (!proto || !proto.getParameter) return;
     const original = proto.getParameter;
-    proto.getParameter = function (param) {
+    proto.getParameter = markNative(function getParameter(param) {
       if (param === 37445) return profile.webglVendor;    // UNMASKED_VENDOR_WEBGL
       if (param === 37446) return profile.webglRenderer;  // UNMASKED_RENDERER_WEBGL
       if (param === 7936) return profile.webglVendor;     // VENDOR
       if (param === 7937) return profile.webglRenderer;   // RENDERER
       return original.call(this, param);
-    };
+    }, 'getParameter');
   };
-  patchGL(w.WebGLRenderingContext && w.WebGLRenderingContext.prototype);
-  patchGL(w.WebGL2RenderingContext && w.WebGL2RenderingContext.prototype);
+  patchGetParameter(w.WebGLRenderingContext && w.WebGLRenderingContext.prototype);
+  patchGetParameter(w.WebGL2RenderingContext && w.WebGL2RenderingContext.prototype);
 
+  try {
+    if (!w.outerWidth) Object.defineProperty(w, 'outerWidth', { get: markNative(function () { return w.innerWidth; }, 'outerWidth', 'get'), configurable: true });
+    if (!w.outerHeight) Object.defineProperty(w, 'outerHeight', { get: markNative(function () { return w.innerHeight; }, 'outerHeight', 'get'), configurable: true });
+  } catch (_) {}
+
+  /* ---- permissions: 'denied' is a Playwright artifact, real handsets say 'default' ---- */
   if (w.Notification && w.Notification.permission === 'denied') {
-    def(w.Notification, 'permission', 'default');
+    try {
+      Object.defineProperty(w.Notification, 'permission', { get: markNative(function () { return 'default'; }, 'permission', 'get'), configurable: true });
+    } catch (_) {}
+  }
+  if (w.Permissions && w.Permissions.prototype && w.Permissions.prototype.query) {
+    const originalQuery = w.Permissions.prototype.query;
+    w.Permissions.prototype.query = markNative(function query(descriptor) {
+      return Promise.resolve(originalQuery.call(this, descriptor)).then((status) => {
+        if (descriptor && descriptor.name === 'notifications' && status && status.state === 'denied') {
+          try { Object.defineProperty(status, 'state', { get: markNative(function () { return 'default'; }, 'state', 'get'), configurable: true }); } catch (_) {}
+        }
+        return status;
+      });
+    }, 'query');
   }
 
-  /* gate 3 - device identity */
+  /* ---- gate 3: device identity ---- */
   let ua = String(n.userAgent || '');
   const versionMatch = /Chrome\/(\d+)/.exec(ua);
   const chromeVersion = versionMatch ? versionMatch[1] : '120';
   const deviceRe = /(Linux; Android [\d.]+; )([^;)]+)((?: Build\/[^;)]+)?)(\))/;
   if (deviceRe.test(ua)) {
-    ua = ua.replace(deviceRe, `$1${profile.model}$3$4`);
+    ua = ua.replace(deviceRe, '$1' + profile.model + '$3$4');
   } else if (/Android/.test(ua)) {
-    ua = `Mozilla/5.0 (Linux; Android ${profile.androidVersion}; ${profile.model}) ` +
-      `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Mobile Safari/537.36`;
+    ua = 'Mozilla/5.0 (Linux; Android ' + profile.androidVersion + '; ' + profile.model + ') ' +
+      'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + '.0.0.0 Mobile Safari/537.36';
   }
-  if (ua && ua !== n.userAgent) def(n, 'userAgent', ua);
+  if (ua) defineGetter(navProto, 'userAgent', ua);
 
-  const uad = n.userAgentData;
-  if (uad) {
-    const brands = uad.brands || [];
-    const nativeHEV = uad.getHighEntropyValues ? uad.getHighEntropyValues.bind(uad) : null;
-    const patched = {
+  /* UA-CH: patch the real NavigatorUAData prototype instead of swapping the object out,
+     so constructor.name / instanceof / toString all stay genuine. */
+  const UAD = w.NavigatorUAData;
+  if (UAD && UAD.prototype && typeof UAD.prototype.getHighEntropyValues === 'function') {
+    const originalHev = UAD.prototype.getHighEntropyValues;
+    UAD.prototype.getHighEntropyValues = markNative(function getHighEntropyValues(hints) {
+      return Promise.resolve(originalHev.call(this, hints)).then((values) => {
+        const out = Object.assign({}, values);
+        out.architecture = profile.architecture;
+        out.bitness = profile.bitness;
+        out.model = profile.model;
+        out.platform = 'Android';
+        out.platformVersion = profile.platformVersion;
+        if (!out.uaFullVersion) out.uaFullVersion = chromeVersion + '.0.0.0';
+        return out;
+      });
+    }, 'getHighEntropyValues');
+  } else if (n.userAgentData) {
+    // Fallback only for engines without NavigatorUAData.
+    const brands = n.userAgentData.brands || [];
+    const nativeHev = n.userAgentData.getHighEntropyValues ? n.userAgentData.getHighEntropyValues.bind(n.userAgentData) : null;
+    const replacement = {
       brands,
       mobile: true,
       platform: 'Android',
-      getHighEntropyValues: (hints) => {
-        const base = nativeHEV ? nativeHEV(hints) : Promise.resolve({});
-        return base.then((values) => Object.assign({}, values, {
+      getHighEntropyValues: markNative(function (hints) {
+        const base = nativeHev ? nativeHev(hints) : Promise.resolve({});
+        return Promise.resolve(base).then((values) => Object.assign({}, values, {
           architecture: profile.architecture,
           bitness: profile.bitness,
           model: profile.model,
           platform: 'Android',
           platformVersion: profile.platformVersion,
-          uaFullVersion: values.uaFullVersion || `${chromeVersion}.0.0.0`
+          uaFullVersion: values.uaFullVersion || (chromeVersion + '.0.0.0')
         }));
-      },
-      toJSON: () => ({ brands, mobile: true, platform: 'Android' })
+      }, 'getHighEntropyValues'),
+      toJSON: markNative(function () { return { brands, mobile: true, platform: 'Android' }; }, 'toJSON')
     };
-    def(n, 'userAgentData', patched);
+    defineGetter(navProto, 'userAgentData', replacement);
   }
 }
 
