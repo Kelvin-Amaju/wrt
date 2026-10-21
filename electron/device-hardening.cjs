@@ -3,8 +3,8 @@
 /**
  * device-hardening.cjs - OrbitQA Desktop
  *
- * Makes a hardened AVD report as retail hardware to browser-layer bot /
- * fingerprint gates. Three gates:
+ * Makes a hardened AVD or Android-emulation session report as retail hardware to
+ * browser-layer bot / fingerprint gates. Three gates:
  *   1. automation-flag      navigator.webdriver, window.chrome.*, cdc_* globals
  *   2. runtime-fingerprint  WebGL vendor+renderer, hardwareConcurrency,
  *                           deviceMemory, maxTouchPoints, platform
@@ -12,6 +12,7 @@
  *                           retail build props
  *
  * Deterministic: values come from the profile, never randomised per load.
+ * Every patched function/getter keeps a native-looking Function.prototype.toString.
  */
 
 const DEFAULT_REAL_DEVICE_AVD = 'OrbitQA_Pixel_7_Real';
@@ -52,15 +53,63 @@ const REAL_DEVICE_PROFILES = Object.freeze({
   })
 });
 
+/**
+ * Host-Chromium Android emulation profiles, keyed by the exact device names the
+ * Device Profiles UI offers. These carry no build props (nothing to spoof natively)
+ * but supply the browser-layer identity so emulation is not left wide open.
+ */
+const ANDROID_EMULATION_DEVICES = Object.freeze({
+  'pixel 11': { model: 'Pixel 11', androidVersion: '17', webglVendor: 'ARM', webglRenderer: 'Mali-G715', screen: { width: 412, height: 923, dpr: 2.625 } },
+  'pixel 11 pro': { model: 'Pixel 11 Pro', androidVersion: '17', webglVendor: 'ARM', webglRenderer: 'Mali-G715', screen: { width: 427, height: 952, dpr: 3 } },
+  'pixel 11 pro xl': { model: 'Pixel 11 Pro XL', androidVersion: '17', webglVendor: 'ARM', webglRenderer: 'Mali-G715', screen: { width: 448, height: 997, dpr: 3 } },
+  'galaxy s26': { model: 'SM-S942B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 360, height: 780, dpr: 3 } },
+  'galaxy s26+': { model: 'SM-S947B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 384, height: 832, dpr: 3.75 } },
+  'galaxy s26 ultra': { model: 'SM-S948B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 384, height: 832, dpr: 3.75 } },
+  'galaxy s26 fe': { model: 'SM-S741B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 730', screen: { width: 360, height: 780, dpr: 3 } },
+  'galaxy z flip8': { model: 'SM-F776B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 360, height: 840, dpr: 3 } },
+  'galaxy z fold8 (open)': { model: 'SM-F971B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 816, height: 616, dpr: 3 } },
+  'pixel 5': { model: 'Pixel 5', androidVersion: '14', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 620', screen: { width: 393, height: 851, dpr: 2.75 } },
+  'galaxy s23': { model: 'SM-S911B', androidVersion: '14', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 740', screen: { width: 360, height: 780, dpr: 3 } }
+});
+
 const UA_DEVICE_RE = /(Linux; Android [\d.]+; )([^;)]+)((?: Build\/[^;)]+)?)(\))/;
 
 function normalise(value) {
   return String(value == null ? '' : value)
     .trim()
     .toLowerCase()
-    .replace(/[_\-.]+/g, ' ')
+    .replace(/[-_.]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function findEmulationDevice(input) {
+  const key = normalise(input);
+  if (!key) return null;
+  if (ANDROID_EMULATION_DEVICES[key]) return { key, override: ANDROID_EMULATION_DEVICES[key] };
+  for (const name of Object.keys(ANDROID_EMULATION_DEVICES)) {
+    if (key.includes(name)) return { key: name, override: ANDROID_EMULATION_DEVICES[name] };
+  }
+  return null;
+}
+
+function buildEmulationProfile(key, override) {
+  const base = REAL_DEVICE_PROFILES['pixel-7-panther'];
+  return {
+    ...base,
+    id: `android-emulation:${key.replace(/[^a-z0-9]+/g, '-')}`,
+    avdNames: [],
+    match: [key],
+    emulationOnly: true,
+    model: override.model,
+    androidVersion: override.androidVersion,
+    platformVersion: `${override.androidVersion}.0.0`,
+    hardwareConcurrency: override.hardwareConcurrency || base.hardwareConcurrency,
+    deviceMemory: override.deviceMemory || base.deviceMemory,
+    webglVendor: override.webglVendor,
+    webglRenderer: override.webglRenderer,
+    screen: override.screen || base.screen
+  };
 }
 
 function findRealDeviceProfile(input) {
@@ -72,6 +121,8 @@ function findRealDeviceProfile(input) {
     if (normalise(profile.model) === key) return profile;
     if (profile.match.some((token) => key === token || key.includes(token))) return profile;
   }
+  const emulation = findEmulationDevice(input);
+  if (emulation) return buildEmulationProfile(emulation.key, emulation.override);
   return null;
 }
 
@@ -153,7 +204,7 @@ function hardeningInit(profile) {
       Object.defineProperty(target, prop, {
         get: getter,
         configurable: true,
-        enumerable: existing ? existing.enumerable : true,
+        enumerable: existing ? existing.enumerable : true
       });
       return true;
     } catch (_) {
@@ -223,7 +274,7 @@ function hardeningInit(profile) {
     if (!w.outerHeight) Object.defineProperty(w, 'outerHeight', { get: markNative(function () { return w.innerHeight; }, 'outerHeight', 'get'), configurable: true });
   } catch (_) {}
 
-  /* ---- permissions: 'denied' is a Playwright artifact, real handsets say 'default' ---- */
+  /* ---- permissions: 'denied' is a driver artifact, real handsets say 'default' ---- */
   if (w.Notification && w.Notification.permission === 'denied') {
     try {
       Object.defineProperty(w.Notification, 'permission', { get: markNative(function () { return 'default'; }, 'permission', 'get'), configurable: true });
@@ -247,15 +298,15 @@ function hardeningInit(profile) {
   const chromeVersion = versionMatch ? versionMatch[1] : '120';
   const deviceRe = /(Linux; Android [\d.]+; )([^;)]+)((?: Build\/[^;)]+)?)(\))/;
   if (deviceRe.test(ua)) {
-    ua = ua.replace(deviceRe, '$1' + profile.model + '$3$4');
+    ua = ua.replace(deviceRe, `$1${profile.model}$3$4`);
   } else if (/Android/.test(ua)) {
-    ua = 'Mozilla/5.0 (Linux; Android ' + profile.androidVersion + '; ' + profile.model + ') ' +
-      'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + '.0.0.0 Mobile Safari/537.36';
+    ua = `Mozilla/5.0 (Linux; Android ${profile.androidVersion}; ${profile.model}) ` +
+      `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Mobile Safari/537.36`;
   }
   if (ua) defineGetter(navProto, 'userAgent', ua);
 
-  /* UA-CH: patch the real NavigatorUAData prototype instead of swapping the object out,
-     so constructor.name / instanceof / toString all stay genuine. */
+  /* UA-CH: patch the real NavigatorUAData prototype instead of swapping the object,
+     so constructor.name / instanceof / toString stay genuine. */
   const UAD = w.NavigatorUAData;
   if (UAD && UAD.prototype && typeof UAD.prototype.getHighEntropyValues === 'function') {
     const originalHev = UAD.prototype.getHighEntropyValues;
@@ -267,12 +318,11 @@ function hardeningInit(profile) {
         out.model = profile.model;
         out.platform = 'Android';
         out.platformVersion = profile.platformVersion;
-        if (!out.uaFullVersion) out.uaFullVersion = chromeVersion + '.0.0.0';
+        if (!out.uaFullVersion) out.uaFullVersion = `${chromeVersion}.0.0.0`;
         return out;
       });
     }, 'getHighEntropyValues');
   } else if (n.userAgentData) {
-    // Fallback only for engines without NavigatorUAData.
     const brands = n.userAgentData.brands || [];
     const nativeHev = n.userAgentData.getHighEntropyValues ? n.userAgentData.getHighEntropyValues.bind(n.userAgentData) : null;
     const replacement = {
@@ -287,7 +337,7 @@ function hardeningInit(profile) {
           model: profile.model,
           platform: 'Android',
           platformVersion: profile.platformVersion,
-          uaFullVersion: values.uaFullVersion || (chromeVersion + '.0.0.0')
+          uaFullVersion: values.uaFullVersion || `${chromeVersion}.0.0.0`
         }));
       }, 'getHighEntropyValues'),
       toJSON: markNative(function () { return { brands, mobile: true, platform: 'Android' }; }, 'toJSON')
@@ -355,8 +405,15 @@ async function collectHardeningReport(page, profile) {
       deviceMemory: n.deviceMemory,
       maxTouchPoints: n.maxTouchPoints,
       webglVendor: null,
-      webglRenderer: null
+      webglRenderer: null,
+      getParameterNative: true,
+      uaDataCtor: n.userAgentData && n.userAgentData.constructor ? n.userAgentData.constructor.name : null
     };
+    try {
+      out.getParameterNative = /native code/.test(
+        Function.prototype.toString.call(WebGLRenderingContext.prototype.getParameter)
+      );
+    } catch (_) {}
     try {
       const canvas = document.createElement('canvas');
       const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
@@ -420,9 +477,11 @@ async function collectHardeningReport(page, profile) {
       pass: raw.ua.includes(p.model) &&
         raw.ua.includes(`Android ${p.androidVersion}`) &&
         !/sdk_gphone|generic/i.test(raw.ua) &&
+        raw.getParameterNative === true &&
+        raw.uaDataCtor === 'NavigatorUAData' &&
         !!uad && uad.model === p.model && uad.platform === 'Android' &&
         uad.platformVersion === p.platformVersion,
-      detail: { userAgent: raw.ua, userAgentData: uad }
+      detail: { userAgent: raw.ua, userAgentData: uad, getParameterNative: raw.getParameterNative, uaDataCtor: raw.uaDataCtor }
     }
   ];
 
@@ -438,7 +497,9 @@ module.exports = {
   HARDENING_EVENT,
   HARDENING_CHECKS,
   REAL_DEVICE_PROFILES,
+  ANDROID_EMULATION_DEVICES,
   normalise,
+  findEmulationDevice,
   findRealDeviceProfile,
   isHardenedAvd,
   resolveProfile,

@@ -32,6 +32,21 @@ test('parses AVD list and adb devices output', () => {
   ]);
 });
 
+test('passes an explicit Windows AVD home to emulator discovery', async () => {
+  for (const overrides of [{}, { ANDROID_AVD_HOME: 'D:\\Avds' }, { ANDROID_USER_HOME: 'D:\\AndroidUser' }]) {
+    const env = { USERPROFILE: 'C:\\Users\\tester', ANDROID_HOME: 'C:\\Android\\Sdk', ...overrides };
+    const expected = overrides.ANDROID_AVD_HOME || path.win32.join(overrides.ANDROID_USER_HOME || 'C:\\Users\\tester\\.android', 'avd');
+    const service = createAndroidService({ env, existsSync: () => true,
+      execFileAsync: async (file, args, options) => {
+        assert.equal(options.env.ANDROID_AVD_HOME, expected);
+        return { stdout: 'OrbitQA_Pixel_7_Real\n' };
+      },
+    });
+    assert.deepEqual(await service.listAvds(), ['OrbitQA_Pixel_7_Real']);
+    assert.equal(env.ANDROID_AVD_HOME, overrides.ANDROID_AVD_HOME);
+  }
+});
+
 test('rejects unsafe AVD names', () => {
   assert.equal(isSafeAvdName('Pixel_9_API_36'), true);
   assert.equal(isSafeAvdName('Pixel 9; calc.exe'), false);

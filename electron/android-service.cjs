@@ -22,6 +22,7 @@ function discoverAndroidSdk(env = process.env, existsSync = fs.existsSync) {
     env.USERPROFILE
       ? win.join(env.USERPROFILE, "AppData", "Local", "Android", "Sdk")
       : "",
+    "C:\\Android\\Sdk",
   ]);
 
   for (const sdkPath of candidates) {
@@ -93,6 +94,14 @@ function buildAvdLaunchArgs(name) {
 
 function createAndroidService(options = {}) {
   const env = options.env || process.env;
+  // Use the same AVD home for discovery and launch, including on Windows
+  // installations where the emulator does not resolve USERPROFILE itself.
+  const emulatorEnv = { ...env };
+  if (!emulatorEnv.ANDROID_AVD_HOME) {
+    const userHome = env.ANDROID_EMULATOR_HOME || env.ANDROID_USER_HOME ||
+      (env.USERPROFILE ? win.join(env.USERPROFILE, ".android") : "");
+    if (userHome) emulatorEnv.ANDROID_AVD_HOME = win.join(userHome, "avd");
+  }
   const existsSync = options.existsSync || fs.existsSync;
   const execFileAsync =
     options.execFileAsync ||
@@ -164,7 +173,7 @@ function createAndroidService(options = {}) {
   async function listAvds() {
     const status = tools();
     if (!status.emulatorAvailable || !status.emulatorPath) return [];
-    const { stdout } = await execFileAsync(status.emulatorPath, ["-list-avds"]);
+    const { stdout } = await execFileAsync(status.emulatorPath, ["-list-avds"], { env: emulatorEnv });
     return parseAvdList(stdout);
   }
 
@@ -285,7 +294,7 @@ function createAndroidService(options = {}) {
 
     const avds = await listAvds();
     if (!avds.includes(name))
-      throw new Error(`Android virtual device not found: ${name}`);
+      throw new Error(`Android virtual device not found: ${name}. Create an Android virtual device with powershell -ExecutionPolicy Bypass -File tools/create-real-device-avd.ps1, then refresh devices.`);
 
     const existingDevices = (await ensureAdbReady()).filter(
       (device) =>
@@ -316,6 +325,7 @@ function createAndroidService(options = {}) {
     }
 
     const child = spawn(status.emulatorPath, args, {
+      env: emulatorEnv,
       // Keep the emulator in the same foreground process model as a successful
       // manual launch. On Windows, detaching the emulator can make startup
       // failures invisible and can prevent the virtual device from ever

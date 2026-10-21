@@ -158,7 +158,7 @@ export function DeviceProfiles() {
             ) : status.avds.length === 0 ? (
               <div className="setup-card">
                 <strong>No Android virtual devices found</strong>
-                <p>Create one AVD in Android Studio → Device Manager, then return to OrbitQA and refresh.</p>
+                <p>Create an Android virtual device by running <code>powershell -ExecutionPolicy Bypass -File tools/create-real-device-avd.ps1</code> from the project folder, then refresh devices.</p>
               </div>
             ) : (
               <div className="avd-control-row">

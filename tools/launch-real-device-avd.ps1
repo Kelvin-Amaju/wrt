@@ -1,6 +1,6 @@
 #requires -version 5.1
 <#
-  Boots the hardened AVD with -prop retail fingerprint overrides, waits for boot,
+  Boots the AVD using its system image identity, waits for boot,
   restores animation scales, and prints the resulting fingerprint.
 #>
 [CmdletBinding()]
@@ -11,34 +11,35 @@ param(
   [switch]$WipeData
 )
 $ErrorActionPreference = 'Stop'
+if (-not $env:ANDROID_AVD_HOME) {
+  $androidHome = if ($env:ANDROID_EMULATOR_HOME) { $env:ANDROID_EMULATOR_HOME } elseif ($env:ANDROID_USER_HOME) { $env:ANDROID_USER_HOME } else { Join-Path $env:USERPROFILE '.android' }
+  $env:ANDROID_AVD_HOME = Join-Path $androidHome 'avd'
+}
 
-$sdk = if ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT }
-       elseif ($env:ANDROID_HOME) { $env:ANDROID_HOME }
-       else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
+function Get-SdkRoot {
+  $candidates = @(
+    $env:ANDROID_SDK_ROOT,
+    $env:ANDROID_HOME,
+    $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }),
+    $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'AppData\Local\Android\Sdk' }),
+    'C:\Android\Sdk'
+  )
+  foreach ($c in $candidates) {
+    if ($c -and (Test-Path $c)) { return $c }
+  }
+  throw 'Android SDK not found. Set ANDROID_SDK_ROOT or ANDROID_HOME.'
+}
+
+$sdk = Get-SdkRoot
 $emulator = Join-Path $sdk 'emulator\emulator.exe'
 $adb      = Join-Path $sdk 'platform-tools\adb.exe'
 if (-not (Test-Path $emulator)) { throw "emulator.exe not found at $emulator" }
 
 $serial = "emulator-$Port"
 
-$props = @(
-  'ro.product.model=Pixel 7',
-  'ro.product.brand=google',
-  'ro.product.manufacturer=Google',
-  'ro.product.device=panther',
-  'ro.product.name=panther',
-  'ro.build.product=panther',
-  'ro.build.tags=release-keys',
-  'ro.build.type=user',
-  'ro.build.fingerprint=google/panther/panther:14/UQ1A.240205.004/11269751:user/release-keys',
-  'ro.system.build.fingerprint=google/panther/panther:14/UQ1A.240205.004/11269751:user/release-keys',
-  'ro.vendor.build.fingerprint=google/panther/panther:14/UQ1A.240205.004/11269751:user/release-keys'
-)
-
 $emuArgs = @('-avd', $AvdName, '-port', $Port, '-no-snapshot-load', '-no-boot-anim', '-gpu', 'host', '-no-audio')
 if ($WipeData) { $emuArgs += '-wipe-data' }
 if ($NoWindow) { $emuArgs += '-no-window' }
-foreach ($p in $props) { $emuArgs += @('-prop', $p) }
 
 Write-Host "Launching $AvdName on $serial ..."
 Start-Process -FilePath $emulator -ArgumentList $emuArgs | Out-Null
@@ -55,5 +56,4 @@ do {
 
 $fp = ((& $adb -s $serial shell getprop ro.build.fingerprint) -join '').Trim()
 Write-Host "ro.build.fingerprint = $fp"
-if ($fp -match 'sdk_gphone|generic') { Write-Warning 'Fingerprint still looks emulated.' } else { Write-Host 'Fingerprint OK.' }
 Write-Host "Serial: $serial"
