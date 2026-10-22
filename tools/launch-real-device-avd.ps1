@@ -57,3 +57,18 @@ do {
 $fp = ((& $adb -s $serial shell getprop ro.build.fingerprint) -join '').Trim()
 Write-Host "ro.build.fingerprint = $fp"
 Write-Host "Serial: $serial"
+
+$props = @(
+  'ro.product.model=Pixel 7',
+  'ro.product.brand=google',
+  'ro.product.manufacturer=Google',
+  'ro.product.device=panther',
+  'ro.product.name=panther',
+  'ro.build.product=panther',
+  'ro.build.tags=release-keys',
+  'ro.build.type=user',
+  'ro.build.fingerprint=google/panther/panther:14/UQ1A.240205.004/11269751:user/release-keys',
+  'ro.system.build.fingerprint=google/panther/panther:14/UQ1A.240205.004/11269751:user/release-keys',
+  'ro.vendor.build.fingerprint=google/panther/panther:14/UQ1A.240205.004/11269751:user/release-keys'
+)
+foreach ($p in $props) { $emuArgs += @('-prop', $p) }

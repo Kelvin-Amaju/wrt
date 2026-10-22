@@ -932,6 +932,11 @@ function normalizeMatrixV3Request(input) {
       enabled: avdRaw.enabled === true,
       browserRuntime: "android-chrome",
       avdNames: uniqueStrings(avdRaw.avdNames),
+      // One emulator process per AVD. Instances beyond 1 require cloned AVDs.
+      instancesPerAvd: normalizeV3PositiveInt(
+        avdRaw.instancesPerAvd ?? 1,
+        "Android AVD instances",
+      ),
       sessionDurationSeconds: normalizeV3Duration(
         avdRaw.sessionDurationSeconds ?? 60,
         "Android AVD session duration",
@@ -2239,17 +2244,13 @@ async function executeAndroidRun({
     throw new Error(
       "The installed browser runtime does not include Android automation support",
     );
-  const devices = await playwright._android.devices();
-  if (devices.length === 0)
-    throw new Error(
-      "No Android device is available through ADB. Open Device Profiles and launch an AVD first.",
-    );
-  if (devices.length > 1)
-    throw new Error(
-      "More than one Android device is connected. Keep only one emulator/device connected for this milestone.",
-    );
+  // Fleet-safe: pick the emulator this run just launched by its ADB serial instead of
+  // assuming it is the only device attached.
+  const device = await findAndroidDeviceBySerial(
+    playwright,
+    launchInfo?.serial,
+  );
 
-  const device = devices[0];
   const hardeningProfile = deviceHardening.findRealDeviceProfile(
     normalized.deviceName,
   );
@@ -2424,7 +2425,6 @@ async function executeAndroidRun({
     unregisterContextResource?.();
     await device.close().catch(() => undefined);
     unregisterDeviceResource?.();
-    void launchInfo;
   }
 }
 
@@ -2746,19 +2746,23 @@ async function findAndroidDeviceBySerial(playwright, serial) {
     throw new Error(
       "No Android device is available through ADB. Open Device Profiles and launch an AVD first.",
     );
-  const exact = devices.find((candidate) => {
-    try {
-      return (
-        typeof candidate.serial === "function" && candidate.serial() === serial
-      );
-    } catch {
-      return false;
-    }
-  });
-  if (exact) return exact;
+  const wanted = String(serial || "").trim();
+  if (wanted) {
+    const exact = devices.find((candidate) => {
+      try {
+        return (
+          typeof candidate.serial === "function" &&
+          candidate.serial() === wanted
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (exact) return exact;
+  }
   if (devices.length === 1) return devices[0];
   throw new Error(
-    `Android AVD ${serial} is ready but the browser runtime could not identify its matching device connection`,
+    `${wanted ? `Android AVD ${wanted} is ready but the` : "The"} browser runtime could not identify its matching device connection among ${devices.length} attached devices`,
   );
 }
 
@@ -3164,6 +3168,9 @@ async function executeMatrixQaRun({
           message: "Run queue metrics updated",
           metrics,
         }),
+      // One emulator process per AVD: work units that share an AVD name serialise,
+      // different AVD names run in parallel. This is what lets a 20-AVD fleet run
+      // 20 concurrent Android sessions.
       exclusivityKey: (unit) =>
         unit.executionKind === "android-avd"
           ? `avd:${unit.androidAvdName}`
@@ -3514,9 +3521,8 @@ async function executeMatrixQaRun({
               Object.assign(contextOptions, emulationHardening.contextOptions);
           }
 
-          context = await browser.newContext(contextOptions);
-          if (emulationHardening?.active)
-            await emulationHardening.afterCreate(context);
+          // NOTE: the browser has not been launched yet at this point, so the context
+          // is created inside the launch gate below, immediately after browser launch.
 
           const proxyContainmentPolicy = buildProxyContainmentLaunchPolicy({
             proxyRequired: Boolean(runtimeProxy.enabled),
@@ -3526,6 +3532,11 @@ async function executeMatrixQaRun({
           const performancePolicy = buildRuntimePerformanceLaunchPolicy({
             browserEngine,
           });
+          // Playwright only honours `args` on launch(), never on newContext(), so the
+          // hardening switches have to be merged into the launch options explicitly.
+          const hardeningLaunchArgs = emulationHardening?.active
+            ? deviceHardening.buildHardeningArgs(emulationHardening.profile)
+            : [];
           const launchOptions = { headless: normalized.headless };
           if (
             browserEngine === "chromium" &&
@@ -3538,6 +3549,7 @@ async function executeMatrixQaRun({
             webRtcLaunchPolicy.args.length > 0 ||
             proxyContainmentPolicy.args.length > 0 ||
             performancePolicy.args.length > 0 ||
+            hardeningLaunchArgs.length > 0 ||
             (normalized.executionMode === "background" &&
               browserEngine === "chromium")
           )
@@ -3545,6 +3557,7 @@ async function executeMatrixQaRun({
               webRtcLaunchPolicy.args,
               proxyContainmentPolicy.args,
               performancePolicy.args,
+              hardeningLaunchArgs,
               normalized.executionMode === "background" &&
                 browserEngine === "chromium"
                 ? [
@@ -3612,6 +3625,10 @@ async function executeMatrixQaRun({
                 );
               }
               context = await browser.newContext(contextOptions);
+              // Register the hardening init script once the context exists and before the
+              // first navigation, so it wins the last write for webdriver / UA / WebGL.
+              if (emulationHardening?.active)
+                await emulationHardening.afterCreate(context);
               if (
                 workUnit.useCookies === true &&
                 cookieStore?.pickAny &&
