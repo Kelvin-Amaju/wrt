@@ -5,6 +5,8 @@ import { Dashboard } from './pages/Dashboard';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 import { Run } from './pages/Run';
 import { RunCenter } from './pages/RunCenter';
+import { Pods } from './pages/pods';
+import { Warmer } from './pages/warmer';
 import { StreamingHub } from './pages/StreamingHub';
 import { SocialHub } from './pages/SocialHub';
 import { DeviceProfiles } from './pages/DeviceProfiles';
@@ -19,6 +21,8 @@ const pageMeta: Record<PageKey, { title: string; eyebrow: string; description: s
   dashboard: { title: 'Dashboard', eyebrow: 'OVERVIEW', description: '' },
   run: { title: 'Run', eyebrow: 'QA ENGINE', description: 'Create controlled browser runs and queue sessions safely.' },
   runs: { title: 'Run Center', eyebrow: 'MULTI-RUN', description: 'Monitor, pause, resume, and stop independent QA runs.' },
+  pods: { title: 'Pods', eyebrow: 'YOUTUBE', description: 'Create pods for instant YouTube without Gmail.' },
+  warmer: { title: 'Warmer', eyebrow: 'WARMUP', description: 'Warm profiles with topics, Google searches, cookies and history.' },
   streaming: { title: 'Streaming Hub', eyebrow: 'STREAMING QA', description: 'Authorized playback, queue, catalog and account-session QA.' },
   'streaming-library': { title: 'Music Library', eyebrow: 'STREAMING QA', description: 'Import links and manage saved music from every supported platform in one place.' },
   'streaming-accounts': { title: 'Accounts', eyebrow: 'STREAMING QA', description: 'Manage authorized streaming logins, cookies, status checks, and network policy.' },
@@ -48,6 +52,8 @@ export default function App() {
         {page === 'dashboard' ? <Dashboard />
           : page === 'run' ? <Run />
           : page === 'runs' ? <RunCenter initialRunId={requestedRunId} onInitialRunHandled={() => setRequestedRunId(null)} />
+          : page === 'pods' ? <Pods />
+          : page === 'warmer' ? <Warmer />
           : page === 'streaming' || page === 'streaming-library' || page === 'streaming-accounts' ? <StreamingHub view={page==='streaming-library'?'library':page==='streaming-accounts'?'accounts':'qa'} />
           : page === 'social' || page === 'social-accounts' ? <SocialHub view={page==='social-accounts'?'accounts':'qa'} />
           : page === 'proxies' ? <ProxyManager />

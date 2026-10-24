@@ -1,0 +1,25 @@
+updates to add
+
+1. pod - for instant youtube without gmail - create the pod name it, select device then how many each eg=20
+then create the random profile of devices and assign countries
+
+2. warmer - place to list topics
+investments
+profiles visits google and search for random things and saves the cookie and history in each profiles
+RUN - run with POD profiles - if i visit a website use from the history
+also on youtube select POD profile
+the targetted videos
+
+to assign gmail account
+specify the account and purpose
+
+account profiles - account authorized session
+login in automatically - fill in the approprate information
+
+always check for manual proxy - until changed - don't change along the way
+
+any saved account should remain - not logged out
+
+dashboard - total counts
+
+make sure it retains other activities
