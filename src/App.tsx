@@ -15,8 +15,6 @@ import { ProxyManager } from './pages/ProxyManager';
 import { ProxyIpHistory } from './pages/ProxyIpHistory';
 import { CookieManager } from './pages/CookieManager';
 import { Scheduler } from './pages/Scheduler';
-import { Pods } from './pages/pods';
-import { Warmer } from './pages/warmer';
 import './styles.css';
 
 const pageMeta: Record<PageKey, { title: string; eyebrow: string; description: string }> = {
@@ -64,8 +62,6 @@ export default function App() {
         {page === 'dashboard' ? <Dashboard />
           : page === 'run' ? <Run podId={requestedPodId} />
           : page === 'runs' ? <RunCenter initialRunId={requestedRunId} onInitialRunHandled={() => setRequestedRunId(null)} />
-          : page === 'pods' ? <Pods />
-          : page === 'warmer' ? <Warmer />
           : page === 'streaming' || page === 'streaming-library' || page === 'streaming-accounts' ? <StreamingHub view={page==='streaming-library'?'library':page==='streaming-accounts'?'accounts':'qa'} />
           : page === 'social' || page === 'social-accounts' ? <SocialHub view={page==='social-accounts'?'accounts':'qa'} />
           : page === 'proxies' ? <ProxyManager />
