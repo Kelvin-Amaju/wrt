@@ -24,6 +24,8 @@ const items: Array<{ key: PageKey; label: string; badge?: string; sub?: boolean 
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'run', label: 'Run', badge: 'CORE' },
   { key: 'runs', label: 'Run Center' },
+  { key: 'pods', label: 'Pods' },
+  { key: 'warmer', label: 'Warmer' },
   { key: 'streaming', label: 'Streaming Hub', badge: 'QA' },
   { key: 'streaming-library', label: 'Music Library', sub: true },
   { key: 'streaming-accounts', label: 'Accounts', sub: true },
