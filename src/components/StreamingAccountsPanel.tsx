@@ -134,7 +134,7 @@ export function StreamingAccountsPanel({
             <summary>ACCOUNT / QA SETTINGS</summary>
             <div className="stream-account-network-grid">
               <label className="field stream-account-proxy"><span>Default QA proxy</span><select aria-label={`Proxy for ${account.label}`} value={account.proxySource||'none'} onChange={e=>void switchProxy(account,e.target.value as ProxySource)}>{proxyOptions.map(item=><option value={item.id} key={item.id}>{item.label}</option>)}</select></label>
-              <div className="field"><span>Manual login network</span><strong>Direct / No proxy</strong><small>Manual sign-in always reuses this account's dedicated normal desktop Chrome/Brave/Edge profile. If it was already verified, it opens the main signed-in account page. Your QA proxy applies later during QA runs.</small></div>
+              <div className="field"><span>Manual login network</span><strong>Uses account's configured proxy</strong><small>Manual sign-in reuses this account's dedicated normal desktop Chrome/Brave/Edge profile and uses the proxy/source configured for this account. If already verified, it opens the main signed-in account page.</small></div>
             </div>
           </details>
 

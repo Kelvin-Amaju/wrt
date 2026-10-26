@@ -18,7 +18,23 @@ function progressPercent(record) {
 }
 function estimateRequested(config) {
   if (Number.isFinite(config?.requestedWorkUnits)) return Math.max(0, Number(config.requestedWorkUnits));
-  if (config?.runKind === 'streaming') return Math.max(0, (config?.accountIds?.length || 0) * (config?.trackIds?.length || 0));
+  if (config?.runKind === 'streaming') {
+    if (Array.isArray(config?.groupPlans) && config.groupPlans.length) {
+      let total = 0;
+      const accountIds = Array.isArray(config?.accountIds) ? config.accountIds : [];
+      const trackCount = Array.isArray(config?.trackIds) ? config.trackIds.length : 0;
+      const intelligenceCycles = Math.max(1, ...config.groupPlans.filter(g => g?.contentIntelligence?.enabled).map(g => Math.max(1, Math.min(100, Math.floor(Number(g.contentIntelligence?.repeatAllGroupCycles) || 1)))));
+      for (const group of config.groupPlans) {
+        const groupAccounts = Array.isArray(group?.accountIds) ? group.accountIds.filter(id => accountIds.includes(id) || accountIds.length === 0) : accountIds;
+        if (!groupAccounts.length) continue;
+        const repeatCount = Math.max(1, Math.min(100, Number(group?.repeatCount) || 1));
+        const tCount = group?.trackMode === 'count' ? Math.max(1, Math.floor(Number(group?.trackCount) || trackCount || 1)) : trackCount;
+        total += groupAccounts.length * repeatCount * intelligenceCycles * (tCount || trackCount || 1);
+      }
+      if (total > 0) return Math.max(0, total);
+    }
+    return Math.max(0, (config?.accountIds?.length || 0));
+  }
   const d = config?.devices;
   if (!d) return 0;
   let total = 0;
@@ -512,7 +528,7 @@ function createRunRegistry({ runStore, executeRun, executeStreamingRun = null, g
       const screenshotsRoot = screenshotsRootProvider ? screenshotsRootProvider(runId) : undefined;
       const executor = record.summary.runKind === 'streaming' ? executeStreamingRun : executeRun;
       if (typeof executor !== 'function') throw new Error(`${record.summary.runKind} run executor is unavailable`);
-      await executor({ runId, request: record.config, screenshotsRoot, emit, signal: controller.signal, globalRunScheduler, checkpoint: record.checkpoint, ...dependencies });
+      const executorResult = await executor({ runId, request: record.config, screenshotsRoot, emit, signal: controller.signal, globalRunScheduler, checkpoint: record.checkpoint, ...dependencies });
       if (runtimes.get(runId) !== runtime || runtime.detached) return;
       if (runtime.intent === 'pause') {
         record.summary.status = 'PAUSED';
@@ -524,7 +540,16 @@ function createRunRegistry({ runStore, executeRun, executeStreamingRun = null, g
         record.summary.counters.running = 0;
         record.summary.counters.queued = 0;
       } else {
-        record.summary.status = 'COMPLETED';
+        const failedCount = Number(record.summary?.counters?.failed || executorResult?.failed || executorResult?.summary?.failed || 0);
+        const completedCount = Number(record.summary?.counters?.completed || executorResult?.completed || executorResult?.summary?.completed || 0);
+        const totalCount = Number(record.summary?.counters?.requested || executorResult?.total || executorResult?.summary?.total || 0);
+        if (failedCount > 0 && (completedCount === 0 || failedCount >= completedCount || failedCount === totalCount)) {
+          record.summary.status = 'FAILED';
+        } else if (failedCount > 0) {
+          record.summary.status = 'COMPLETED';
+        } else {
+          record.summary.status = 'COMPLETED';
+        }
         record.summary.counters.running = 0;
         record.summary.counters.queued = 0;
       }

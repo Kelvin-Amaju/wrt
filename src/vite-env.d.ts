@@ -6,6 +6,7 @@ import type { QaRunRequestV2, QaRunRequestV3 } from './shared/qaMatrix';
 import type { AutoRerunMode, AutoRerunState, BulkDeleteRunScope, RunDetail, RunSummary, StuckRunRecoveryState } from './shared/runCenter';
 import type { SavedStreamingArtist, SpotifyCatalogConnectionStatus, StreamingAccountPublic, StreamingAccountVerificationSession, StreamingCatalogFetchResult, StreamingCatalogProgress, StreamingCollection, StreamingDeviceFamily, StreamingPlatform, StreamingRunConfig, StreamingSourceInspection, StreamingTrack } from './shared/streaming';
 import type { MobileStatus } from './shared/mobileDevices';
+import type { Pod, PodProfile, WarmerAssignment, WarmerRunSummary, WarmerTopic } from './shared/pods';
 import type { SocialAccountPublic, SocialAccountVerificationSession, SocialPlatform, SocialQaGroup, SocialRunRequest, SocialRunSummary, SocialTarget } from './shared/social';
 import type { QaCookieDraft, QaCookieRecord } from './shared/cookies';
 import type { ProxyActivityEntry, ProxyImportResult, ProxyKind, ProxyPublicRecord, ProxySource, ProxySummary } from './shared/proxy';
@@ -19,6 +20,23 @@ import type {
 declare global {
   interface Window {
     orbitqa?: {
+      listPods: () => Promise<Pod[]>;
+      createPod: (request: { name?: string; deviceType: PodProfile['deviceType']; country: PodProfile['country']; count: number; fingerprints?: PodProfile['fingerprint'][] }) => Promise<any>;
+      deletePod: (id: string) => Promise<any>;
+      listPodProfiles: (podId?: string) => Promise<PodProfile[]>;
+      deletePodProfile: (id: string) => Promise<any>;
+      assignPodProfileProxy: (profileId: string, proxyId: string | null) => Promise<any>;
+      listWarmerTopics: () => Promise<WarmerTopic[]>;
+      addWarmerTopic: (label: string) => Promise<any>;
+      removeWarmerTopic: (id: string) => Promise<any>;
+      listWarmerAssignments: () => Promise<WarmerAssignment[]>;
+      addWarmerAssignment: (request: Omit<WarmerAssignment, 'id' | 'createdAt'>) => Promise<any>;
+      removeWarmerAssignment: (id: string) => Promise<any>;
+      startWarmerRun: (request: { podId: string; profileIds?: string[]; topicIds?: string[] }) => Promise<any>;
+      stopWarmerRun: (id: string) => Promise<any>;
+      listWarmerRuns: () => Promise<WarmerRunSummary[]>;
+      getWarmerRun: (id: string) => Promise<WarmerRunSummary | null>;
+      onWarmerEvent: (listener: (event: any) => void) => () => void;
       listScheduledTasks: () => Promise<SchedulerTask[]>;
       saveScheduledTask: (request: SchedulerTaskDraft) => Promise<SchedulerTask>;
       deleteScheduledTask: (id: string) => Promise<{ id:string; deleted:boolean }>;
@@ -64,12 +82,12 @@ declare global {
       resumeQaRun: (runId: string) => Promise<{ runId: string; resumed: boolean }>;
       rerunQaRun: (runId: string) => Promise<{ runId: string; rerun: boolean; sourceRunId?: string; reason?: string }>;
       deleteQaRun: (runId: string) => Promise<{ runId: string; deleted: boolean; reason?: string }>;
-      bulkDeleteQaRuns: (scope: BulkDeleteRunScope, runKind?: 'run' | 'streaming' | 'social') => Promise<{ scope: BulkDeleteRunScope; deleted: number; runIds: string[] }>;
-      getAutoRerunState: (runKind?: 'run' | 'streaming' | 'social') => Promise<AutoRerunState>;
-      configureAutoRerun: (request: { enabled?: boolean; mode?: AutoRerunMode; maxConcurrent?: number; selectedRunIds?: string[] }, runKind?: 'run' | 'streaming' | 'social') => Promise<AutoRerunState>;
-      getStuckRunRecoveryState: (runKind?: 'run' | 'streaming' | 'social') => Promise<StuckRunRecoveryState>;
-      configureStuckRunRecovery: (request: { enabled?: boolean; timeoutMinutes?: number; maxAttempts?: number }, runKind?: 'run' | 'streaming' | 'social') => Promise<StuckRunRecoveryState>;
-      stopAllQaRuns: (runKind?: 'run' | 'streaming' | 'social') => Promise<{ stopped: number; runIds: string[] }>;
+      bulkDeleteQaRuns: (scope: BulkDeleteRunScope, runKind?: 'run' | 'streaming' | 'social' | 'warmer') => Promise<{ scope: BulkDeleteRunScope; deleted: number; runIds: string[] }>;
+      getAutoRerunState: (runKind?: 'run' | 'streaming' | 'social' | 'warmer') => Promise<AutoRerunState>;
+      configureAutoRerun: (request: { enabled?: boolean; mode?: AutoRerunMode; maxConcurrent?: number; selectedRunIds?: string[] }, runKind?: 'run' | 'streaming' | 'social' | 'warmer') => Promise<AutoRerunState>;
+      getStuckRunRecoveryState: (runKind?: 'run' | 'streaming' | 'social' | 'warmer') => Promise<StuckRunRecoveryState>;
+      configureStuckRunRecovery: (request: { enabled?: boolean; timeoutMinutes?: number; maxAttempts?: number }, runKind?: 'run' | 'streaming' | 'social' | 'warmer') => Promise<StuckRunRecoveryState>;
+      stopAllQaRuns: (runKind?: 'run' | 'streaming' | 'social' | 'warmer') => Promise<{ stopped: number; runIds: string[] }>;
       stopQaRun: (runId: string) => Promise<{ runId: string; stopped: boolean; state?: { phase: 'idle' | 'running' | 'stopping'; runId: string | null } }>;
       getBrowserRuntimeStatus: () => Promise<BrowserRuntimeStatus>;
       listProxyIpHistory: (query?: ProxyIpHistoryQuery) => Promise<ProxyIpHistoryPage>;

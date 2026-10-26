@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================================
-echo   ORBITQA DESKTOP v0.20.1 - ONE-CLICK WINDOWS BUILDER
+echo   ORBITQA DESKTOP v0.21.80 - ONE-CLICK WINDOWS BUILDER
 echo ============================================================
 echo.
 
@@ -24,7 +24,7 @@ if not exist "node_modules\.bin\vite.cmd" (
 )
 
 echo.
-echo [2/3] Building and type-checking OrbitQA v0.20.1...
+echo [2/3] Building and type-checking OrbitQA v0.21.80...
 call npm.cmd run build
 if errorlevel 1 goto :failed
 
@@ -35,11 +35,11 @@ if errorlevel 1 goto :failed
 
 echo.
 echo ============================================================
-echo BUILD COMPLETE - ORBITQA v0.20.1
+echo BUILD COMPLETE - ORBITQA v0.21.80
 echo ============================================================
 echo.
 echo Your portable app is in the RELEASE folder:
-echo OrbitQA-Desktop-v0.20.1-portable.exe
+echo OrbitQA-Desktop-v0.21.80-portable.exe
 echo.
 if exist "%CD%\release" explorer "%CD%\release"
 pause

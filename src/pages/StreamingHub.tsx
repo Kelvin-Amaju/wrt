@@ -525,7 +525,19 @@ export function StreamingHub({view='qa'}:{view?:StreamingHubView}){
         muteAudio:playback.muteAudio,
         contentIntelligence,
         captureScreenshots:playback.captureScreenshots,
-        requestedWorkUnits:eligibleAccountIds.length,
+        requestedWorkUnits: (()=>{
+          try {
+            let total = 0;
+            for (const g of groupPlansForRun as any[]) {
+              const acc = Array.isArray(g?.accountIds) ? g.accountIds.length : 0;
+              if (!acc) continue;
+              const rep = Math.max(1, Number(g?.repeatCount)||1);
+              const t = g?.trackMode === 'count' ? Math.max(1, Number(g?.trackCount)||Math.max(1, runTracks.length)) : Math.max(1, runTracks.length);
+              total += acc * rep * t;
+            }
+            return total > 0 ? total : eligibleAccountIds.length * Math.max(1, runTracks.length);
+          } catch { return eligibleAccountIds.length * Math.max(1, runTracks.length); }
+        })(),
         concurrency:{mode:'manual' as const,value:eligibleAccountIds.length},
       };
       const created=await window.orbitqa?.startStreamingRun?.(request);

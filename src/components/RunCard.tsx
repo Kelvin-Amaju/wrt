@@ -5,8 +5,8 @@ type Props = {
   run: RunSummary;
   onOpen: (runId: string) => void;
   onStop: (runId: string) => void;
-  onPause: (runId: string) => void;
-  onResume: (runId: string) => void;
+  onPause?: (runId: string) => void;
+  onResume?: (runId: string) => void;
   onRerun?: (runId: string) => void;
   onDelete?: (runId: string) => void;
 };
@@ -25,6 +25,7 @@ export function RunCard({ run, onOpen, onStop, onPause, onResume, onRerun, onDel
   const completedAt = isTerminal ? new Date(run.updatedAt).toLocaleString() : null;
   const isStreaming = run.runKind === 'streaming';
   const isSocial = run.runKind === 'social';
+  const isWarmer = run.runKind === 'warmer';
   const visibleDeviceFamilies = isStreaming ? run.deviceFamilies.filter((family) => family !== 'Streaming QA') : run.deviceFamilies;
 
   return (
@@ -35,6 +36,7 @@ export function RunCard({ run, onOpen, onStop, onPause, onResume, onRerun, onDel
           <h3>{run.targetSummary}</h3>
           {isStreaming && <span className="run-kind-badge">Streaming QA</span>}
           {isSocial && <span className="run-kind-badge">Social QA</span>}
+          {isWarmer && <span className="run-kind-badge">Profile warmer</span>}
           {run.autoRerunSelected && <span className="run-kind-badge run-kind-badge--auto">AUTO RUN AGAIN</span>}
         </div>
         <span className={`run-status-badge run-status-badge--${run.status.toLowerCase()}`}>{run.status}</span>
@@ -68,8 +70,8 @@ export function RunCard({ run, onOpen, onStop, onPause, onResume, onRerun, onDel
       {run.resourceMessage && <p className="run-card__message">{run.resourceMessage}</p>}
       <div className="run-card__actions">
         <button type="button" className="text-button" onClick={() => onOpen(run.runId)}>{isTerminal ? 'View' : 'Open'}</button>
-        {canPause && !isSocial && <button type="button" className="text-button" onClick={() => onPause(run.runId)}>Pause</button>}
-        {canResume && !isSocial && <button type="button" className="text-button" onClick={() => onResume(run.runId)}>Resume</button>}
+        {canPause && !isSocial && !isWarmer && onPause && <button type="button" className="text-button" onClick={() => onPause(run.runId)}>Pause</button>}
+        {canResume && !isSocial && !isWarmer && onResume && <button type="button" className="text-button" onClick={() => onResume(run.runId)}>Resume</button>}
         {canStop && <button type="button" className="danger-button compact-button" onClick={() => onStop(run.runId)}>Stop</button>}
         {isTerminal && onRerun && <button type="button" className="text-button run-again-button" onClick={() => onRerun(run.runId)}>Run Again</button>}
         {isTerminal && onDelete && <button type="button" className="danger-button compact-button" onClick={() => {

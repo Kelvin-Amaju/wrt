@@ -12,7 +12,7 @@ export type RunStatus =
   | 'FAILED';
 
 export type RunExecutionMode = 'visible' | 'background';
-export type RunKind = 'qa' | 'streaming' | 'social';
+export type RunKind = 'qa' | 'streaming' | 'social' | 'warmer';
 export type AutoRerunMode = 'completed-only' | 'all-finished';
 export type BulkDeleteRunScope = 'completed' | 'failed' | 'stopped' | 'all-finished';
 
@@ -135,6 +135,7 @@ export function normalizeRunExecutionMode(value: unknown): RunExecutionMode {
 }
 
 export function normalizeRunKind(value: unknown): RunKind {
+  if (value === 'warmer') return 'warmer';
   if (value === 'streaming') return 'streaming';
   if (value === 'social') return 'social';
   return 'qa';

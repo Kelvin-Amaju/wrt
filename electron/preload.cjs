@@ -1,6 +1,27 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('orbitqa', {
+  listPods: () => ipcRenderer.invoke('pod:list'),
+  createPod: (request) => ipcRenderer.invoke('pod:create', request),
+  deletePod: (id) => ipcRenderer.invoke('pod:delete', id),
+  listPodProfiles: (podId) => ipcRenderer.invoke('pod:listProfiles', podId),
+  deletePodProfile: (id) => ipcRenderer.invoke('pod:deleteProfile', id),
+  assignPodProfileProxy: (profileId, proxyId) => ipcRenderer.invoke('pod:assignProxy', profileId, proxyId),
+  listWarmerTopics: () => ipcRenderer.invoke('warmer:listTopics'),
+  addWarmerTopic: (label) => ipcRenderer.invoke('warmer:addTopic', label),
+  removeWarmerTopic: (id) => ipcRenderer.invoke('warmer:removeTopic', id),
+  listWarmerAssignments: () => ipcRenderer.invoke('warmer:listAssignments'),
+  addWarmerAssignment: (request) => ipcRenderer.invoke('warmer:addAssignment', request),
+  removeWarmerAssignment: (id) => ipcRenderer.invoke('warmer:removeAssignment', id),
+  startWarmerRun: (request) => ipcRenderer.invoke('warmer:startRun', request),
+  stopWarmerRun: (id) => ipcRenderer.invoke('warmer:stopRun', id),
+  listWarmerRuns: () => ipcRenderer.invoke('warmer:listRuns'),
+  getWarmerRun: (id) => ipcRenderer.invoke('warmer:getRun', id),
+  onWarmerEvent: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on('warmer:event', handler);
+    return () => ipcRenderer.removeListener('warmer:event', handler);
+  },
   getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
   listScheduledTasks: () => ipcRenderer.invoke('scheduler:list'),
   saveScheduledTask: (request) => ipcRenderer.invoke('scheduler:save', request),

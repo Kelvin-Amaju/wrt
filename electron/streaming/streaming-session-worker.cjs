@@ -591,6 +591,14 @@ function randomPauseOffsetMs({runId='',accountId='',visit=1,targetMs=1000}={}){
   const ratio=0.2+(unit*0.55);
   return Math.max(0,Math.min(Math.max(0,target-100),Math.floor(target*ratio)));
 }
+function activeTrackMatchesCached(page,id,track,cacheRef){
+  if(!cacheRef) return null;
+  try {
+    const now = Date.now();
+    if(cacheRef.trackKey === (track?.id||track?.url) && cacheRef.id === id && (now - cacheRef.ts) < 250) return cacheRef.value;
+  } catch {}
+  return null;
+}
 async function playbackEvidence(controls,signal){
   if(typeof controls?.isPlaying!=='function')return {status:'PASS',reason:'Playback start was confirmed; continuous playback probe is unavailable'};
   try{return await boundedBrowserProbe('Playback status',()=>controls.isPlaying(),{signal});}catch(error){if(error?.code==='ORBITQA_STREAMING_PROBE_STALLED')throw error;return {status:'WARNING',reason:error instanceof Error?error.message:String(error)};}

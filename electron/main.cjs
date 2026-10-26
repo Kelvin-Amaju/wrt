@@ -49,6 +49,8 @@ const { createStreamingRunPreparer, sanitizeStreamingRunRequest } = require('./s
 const { createContentIntelligenceStore } = require('./content-intelligence-store.cjs');
 const { createSchedulerManager } = require('./scheduler-manager.cjs');
 const { createSchedulerTaskExecutor } = require('./scheduler-actions.cjs');
+const { createPodStore } = require('./pod-store.cjs');
+const { createWarmerRunner } = require('./warmer/warmer-runner.cjs');
 
 let realIosService = null;
 let proxyPoolService = null;
@@ -77,6 +79,8 @@ let socialRunner = null;
 let contentIntelligenceStore = null;
 let laneAutomationManager = null;
 let schedulerManager = null;
+let podStore = null;
+let warmerRunner = null;
 const catalogOperationControllers = new Map();
 const catalogFetchCache = new Map();
 let quittingAfterPause = false;
@@ -145,6 +149,12 @@ function broadcastSocialEvent(payload) {
   }
 }
 
+function broadcastWarmerEvent(payload) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('warmer:event', payload);
+  }
+}
+
 ipcMain.handle('app:getInfo', () => ({ name: 'OrbitQA Desktop', version: app.getVersion(), platform: process.platform }));
 ipcMain.handle('mobile:getStatus', () => androidService.getStatus());
 ipcMain.handle('mobile:startSetup', () => androidSetup.start());
@@ -152,6 +162,7 @@ ipcMain.handle('mobile:getSetupState', () => androidSetup.getState());
 ipcMain.handle('mobile:listAvds', () => androidService.listAvds());
 ipcMain.handle('mobile:launchAvd', (_event, name) => androidService.launchAvd(String(name || '')));
 ipcMain.handle('mobile:stopAvd', (_event, serial) => androidService.stopAvd(serial ? String(serial) : undefined));
+require('./android-ipc.cjs').registerAndroidIpc(ipcMain);
 ipcMain.handle('realIos:getConfig', () => realIosService.getPublicConfig());
 ipcMain.handle('realIos:saveConfig', (_event, request) => realIosService.saveConfig(request));
 ipcMain.handle('realIos:checkConnection', () => realIosService.checkConnection());
@@ -163,6 +174,26 @@ ipcMain.handle('cookie:add', (_event, request) => cookieStore.add(request || {})
 ipcMain.handle('cookie:importJson', (_event, json) => cookieStore.importJson(json));
 ipcMain.handle('cookie:delete', (_event, ids) => cookieStore.remove(Array.isArray(ids) ? ids : []));
 ipcMain.handle('cookie:setEnabled', (_event, ids, enabled) => cookieStore.setEnabled(Array.isArray(ids) ? ids : [], enabled === true));
+
+function requirePodStore() { if (!podStore) throw new Error('Pods are still starting'); return podStore; }
+function guardedPodIpc(action) { try { return action(); } catch (error) { return { ok: false, error: { code: 'POD_IPC_ERROR', message: error instanceof Error ? error.message : String(error) } }; } }
+ipcMain.handle('pod:list', () => guardedPodIpc(() => requirePodStore().listPods()));
+ipcMain.handle('pod:create', (_event, request) => guardedPodIpc(() => requirePodStore().createPod(request || {})));
+ipcMain.handle('pod:delete', (_event, id) => guardedPodIpc(() => requirePodStore().deletePod(String(id || ''))));
+ipcMain.handle('pod:listProfiles', (_event, podId) => guardedPodIpc(() => requirePodStore().listProfiles(podId || undefined)));
+ipcMain.handle('pod:deleteProfile', (_event, id) => guardedPodIpc(() => requirePodStore().deleteProfile(String(id || ''))));
+ipcMain.handle('pod:assignProxy', (_event, profileId, proxyId) => guardedPodIpc(() => requirePodStore().updateProfile(String(profileId || ''), { proxyId: proxyId ? String(proxyId) : null })));
+ipcMain.handle('warmer:listTopics', () => guardedPodIpc(() => requirePodStore().listTopics()));
+ipcMain.handle('warmer:addTopic', (_event, label) => guardedPodIpc(() => requirePodStore().addTopic(label)));
+ipcMain.handle('warmer:removeTopic', (_event, id) => guardedPodIpc(() => requirePodStore().removeTopic(String(id || ''))));
+ipcMain.handle('warmer:listAssignments', () => guardedPodIpc(() => requirePodStore().listAssignments()));
+ipcMain.handle('warmer:addAssignment', (_event, request) => guardedPodIpc(() => requirePodStore().addAssignment(request || {})));
+ipcMain.handle('warmer:removeAssignment', (_event, id) => guardedPodIpc(() => requirePodStore().removeAssignment(String(id || ''))));
+ipcMain.handle('warmer:startRun', (_event, request) => guardedPodIpc(() => { if (!warmerRunner) return { ok: false, error: 'Warmer is still starting' }; return warmerRunner.start(request || {}); }));
+ipcMain.handle('warmer:stopRun', (_event, id) => guardedPodIpc(() => warmerRunner?.stop(String(id || '')) || { ok: false, error: 'Warmer is still starting' }));
+ipcMain.handle('warmer:listRuns', () => guardedPodIpc(() => warmerRunner?.list() || []));
+ipcMain.handle('warmer:getRun', (_event, id) => guardedPodIpc(() => warmerRunner?.get(String(id || '')) || null));
+
 ipcMain.handle('proxy:list', (_event, kind) => safeProxyIpc(() => requireProxyPoolService().list(kind || undefined)));
 ipcMain.handle('proxy:import', (_event, request) => safeProxyIpc(() => requireProxyPoolService().importText(request || {})));
 ipcMain.handle('proxy:update', (_event, id, patch) => safeProxyIpc(() => requireProxyPoolService().update(String(id || ''), patch || {})));
@@ -199,16 +230,16 @@ async function rerunSocialForCenter(runId,{automatic=false,recovery=false}={}){
   void socialRunner.execute({...snapshot,runId:id,attemptCount,automatic,recovery});
   return {runId:id,rerun:true,sourceRunId:id};
 }
-function listAllRunCenterSummaries(){const base=requireRunRegistry().listRuns().map(r=>r.runKind==='streaming'?{...r,autoRerunSelected:Boolean(laneAutomationManager?.isSelected?.('streaming',r.runId))}:r);const social=socialRunStore?.list?.().map(socialRunCenterSummary).filter(Boolean)||[];return [...base,...social].sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));}
+function listAllRunCenterSummaries(){const base=requireRunRegistry().listRuns().map(r=>r.runKind==='streaming'?{...r,autoRerunSelected:Boolean(laneAutomationManager?.isSelected?.('streaming',r.runId))}:r);const social=socialRunStore?.list?.().map(socialRunCenterSummary).filter(Boolean)||[];const warmer=(warmerRunner?.list?.()||[]).map(r=>({...r,runKind:'warmer',updatedAt:r.finishedAt||r.startedAt,createdAt:r.startedAt,executionMode:'background',targetSummary:`Warmer · ${r.profileIds.length} profiles`,deviceFamilies:[],requestedConcurrency:3,counters:{requested:r.profileIds.length,running:r.status==='RUNNING'?r.profileIds.length:0,queued:0,completed:r.status==='COMPLETED'?r.profileIds.length:0,failed:r.status==='FAILED'?r.profileIds.length:0,cancelled:r.status==='STOPPED'?r.profileIds.length:0,incomplete:r.status==='RUNNING'?r.profileIds.length:0}}));return [...base,...social,...warmer].sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));}
 ipcMain.handle('qa:createRun', async (_event, request) => requireRunRegistry().createRun(normalizeQaRunRequest(request)));
 ipcMain.handle('qa:startRun', async (_event, request) => requireRunRegistry().createRun(normalizeQaRunRequest(request)));
 ipcMain.handle('qa:listRuns', () => listAllRunCenterSummaries());
-ipcMain.handle('qa:getRun', (_event, runId) => { const id=String(runId||''); const social=getSocialRunForCenter(id); return social?socialRunCenterDetail(social):requireRunRegistry().getRun(id); });
-ipcMain.handle('qa:stopRun', (_event, runId) => { const id=String(runId||''); if(getSocialRunForCenter(id)) return socialRunner?.stop?.(id)||{runId:id,stopped:false}; return requireRunRegistry().stopRun(id); });
+ipcMain.handle('qa:getRun', (_event, runId) => { const id=String(runId||''); const social=getSocialRunForCenter(id); if(social)return socialRunCenterDetail(social); const warmer=warmerRunner?.get?.(id); if(warmer)return {...warmer,runKind:'warmer',createdAt:warmer.startedAt,updatedAt:warmer.finishedAt||warmer.startedAt,executionMode:'background',requestedConcurrency:3,targetSummary:`Warmer · ${warmer.profileIds.length} profiles`,deviceFamilies:[],counters:{requested:warmer.profileIds.length,running:warmer.status==='RUNNING'?warmer.profileIds.length:0,queued:0,completed:warmer.status==='COMPLETED'?warmer.profileIds.length:0,failed:warmer.status==='FAILED'?warmer.profileIds.length:0,cancelled:warmer.status==='STOPPED'?warmer.profileIds.length:0,incomplete:warmer.status==='RUNNING'?warmer.profileIds.length:0},config:{podId:warmer.podId,profileIds:warmer.profileIds},logs:[]}; return requireRunRegistry().getRun(id); });
+ipcMain.handle('qa:stopRun', (_event, runId) => { const id=String(runId||''); if(getSocialRunForCenter(id)) return socialRunner?.stop?.(id)||{runId:id,stopped:false}; if(warmerRunner?.get?.(id)) return warmerRunner.stop(id); return requireRunRegistry().stopRun(id); });
 ipcMain.handle('qa:pauseRun', (_event, runId) => requireRunRegistry().pauseRun(String(runId || '')));
 ipcMain.handle('qa:resumeRun', (_event, runId) => requireRunRegistry().resumeRun(String(runId || '')));
-ipcMain.handle('qa:rerunRun', (_event, runId) => { const id=String(runId||''); if(getSocialRunForCenter(id)) return rerunSocialForCenter(id); return requireRunRegistry().rerunRun(id); });
-ipcMain.handle('qa:deleteRun', (_event, runId) => { const id=String(runId||''); if(getSocialRunForCenter(id)) return socialRunStore?.delete?.(id)||{runId:id,deleted:false}; return requireRunRegistry().deleteRun(id); });
+ipcMain.handle('qa:rerunRun', (_event, runId) => { const id=String(runId||''); if(getSocialRunForCenter(id)) return rerunSocialForCenter(id); if(warmerRunner?.get?.(id)) return {runId:id,rerun:false,reason:'warmer-runs-cannot-be-replayed'}; return requireRunRegistry().rerunRun(id); });
+ipcMain.handle('qa:deleteRun', (_event, runId) => { const id=String(runId||''); if(getSocialRunForCenter(id)) return socialRunStore?.delete?.(id)||{runId:id,deleted:false}; if(warmerRunner?.get?.(id)) return warmerRunner.delete(id); return requireRunRegistry().deleteRun(id); });
 ipcMain.handle('qa:bulkDeleteRuns', async (_event, scope, runKind) => {
   const normalizedScope=String(scope||''); const kind=String(runKind||'');
   if(!['completed','failed','stopped','all-finished'].includes(normalizedScope)) throw new Error('Unsupported bulk delete scope');
@@ -216,6 +247,10 @@ ipcMain.handle('qa:bulkDeleteRuns', async (_event, scope, runKind) => {
   if(kind==='social'){
     const rows=socialRunStore?.list?.()||[]; const ids=rows.filter(r=>terminalForScope(String(r.status||''))).map(r=>String(r.runId)); const deleted=[];
     for(const id of ids){const result=socialRunStore?.delete?.(id);if(result?.deleted)deleted.push(id);} return {scope:normalizedScope,deleted:deleted.length,runIds:deleted};
+  }
+  if(kind==='warmer'){
+    const rows=warmerRunner?.list?.()||[]; const ids=rows.filter(r=>terminalForScope(String(r.status||''))).map(r=>String(r.runId)); const deleted=[];
+    for(const id of ids){const result=warmerRunner?.delete?.(id);if(result?.ok)deleted.push(id);} return {scope:normalizedScope,deleted:deleted.length,runIds:deleted};
   }
   if(kind==='run'||kind==='streaming'){
     const expected=kind==='streaming'?'streaming':'qa'; const rows=requireRunRegistry().listRuns().filter(r=>(r.runKind||'qa')===expected&&terminalForScope(String(r.status||''))); const deleted=[];
@@ -229,6 +264,7 @@ ipcMain.handle('qa:getStuckRunRecoveryState', (_event, runKind) => { const kind=
 ipcMain.handle('qa:configureStuckRunRecovery', (_event, request, runKind) => { const kind=String(runKind||'run'); return kind==='run'?requireRunRegistry().configureStuckRunRecovery(request||{}):laneAutomationManager?.configureRecovery?.(kind,request||{}); });
 ipcMain.handle('qa:stopAllRuns', async (_event, runKind) => {
   const kind=String(runKind||'');
+  if(kind==='warmer'){const ids=(warmerRunner?.list?.()||[]).filter(r=>r.status==='RUNNING').map(r=>r.runId); for(const id of ids) warmerRunner.stop(id); return {stopped:ids.length,runIds:ids};}
   if(kind==='social'){
     const active=new Set(['CREATED','STARTING','RUNNING','PAUSING','PAUSED','RESUMING','STOPPING']); const ids=(socialRunStore?.list?.()||[]).filter(r=>active.has(String(r.status||''))).map(r=>String(r.runId));
     for(const id of ids) socialRunner?.stop?.(id); return {stopped:ids.length,runIds:ids};
@@ -541,6 +577,7 @@ ipcMain.handle('qa:getRunState', () => {
 app.whenReady().then(async () => {
   ensureRuntimePerformanceMode();
   const userDataPath = app.getPath('userData');
+  podStore = createPodStore({ userDataPath });
   contentIntelligenceStore = createContentIntelligenceStore({userDataPath});
   realIosService = createRealIosService({ userDataPath, safeStorage, provider: createRealIosProvider({fetchImpl:guardedFetch}) });
   const { chromium, webkit, devices } = require('playwright');
@@ -550,6 +587,7 @@ app.whenReady().then(async () => {
   const proxyHealthChecker = createProxyHealthChecker({ chromium, routeCheckUrl });
   proxyPoolService = createProxyPoolService({ store: proxyStore, healthChecker: proxyHealthChecker });
   proxyPoolService.start();
+  warmerRunner = createWarmerRunner({ userDataPath, podStore, cookieStore, chromium, webkit, firefox: require('playwright').firefox, proxyPoolService, emit: broadcastWarmerEvent });
   const ipCountryResolver = createIpCountryResolver({ lookup:lookupIpCountry, concurrency:1 });
   proxyIpHistory = createProxyIpHistoryStore({
     filePath:path.join(userDataPath, 'proxy-ip-history.json'),

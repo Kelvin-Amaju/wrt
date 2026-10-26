@@ -136,7 +136,7 @@ function upsertBoundedWorkState(
   return pruneWorkStates(reordered);
 }
 
-export function Run() {
+export function Run({ podId }: { podId?: string | null } = {}) {
   const [urlPoolText, setUrlPoolText] = useState('');
   const [devices, setDevices] = useState<QaDeviceMatrixConfig>(() => createDefaultDeviceMatrix());
   const [proxyMode, setProxyMode] = useState<ProxyMode>('general');
@@ -416,6 +416,7 @@ export function Run() {
 
   return (
     <div className="run-page">
+      {podId && <div className="panel pod-run-handoff" role="status">Pod {podId} was passed from Pods. Configure the matching device family before starting this QA run.</div>}
       <section className="hero run-hero">
         <div>
           <span className="section-kicker">QA ENGINE · V0.12 URL POOL</span>

@@ -1,6 +1,24 @@
+import { useEffect, useState } from 'react';
 import { MetricCard } from '../components/MetricCard';
 
 export function Dashboard() {
+  const [runs, setRuns] = useState<any[]>([]);
+  const [totalProfiles, setTotalProfiles] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      if (document.hidden) return;
+      try {
+        const [nextRuns, profiles] = await Promise.all([window.orbitqa?.listQaRuns?.() ?? [], window.orbitqa?.listPodProfiles?.() ?? []]);
+        if (!cancelled) { setRuns(nextRuns); setTotalProfiles(profiles.length); }
+      } catch { /* Keep the latest successful dashboard metrics. */ }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+  const terminal = runs.filter((run) => ['COMPLETED', 'FAILED', 'STOPPED'].includes(run.status));
+  const successRate = terminal.length ? `${Math.round((terminal.filter((run) => run.status === 'COMPLETED').length / terminal.length) * 100)}%` : '—';
   return (
     <div className="dashboard-page">
       <section className="hero">
@@ -13,10 +31,11 @@ export function Dashboard() {
       </section>
 
       <section className="metrics-grid" aria-label="QA metrics">
-        <MetricCard label="TOTAL RUNS" value="0" hint="No saved runs yet" tone="violet" />
-        <MetricCard label="RUNNING" value="0" hint="Queue is idle" tone="cyan" />
-        <MetricCard label="COMPLETED" value="0" hint="Ready for first run" tone="green" />
-        <MetricCard label="SUCCESS RATE" value="—" hint="Calculated after runs" tone="amber" />
+        <MetricCard label="TOTAL RUNS" value={String(runs.length)} hint={runs.length ? 'Saved run history' : 'No saved runs yet'} tone="violet" />
+        <MetricCard label="RUNNING" value={String(runs.filter((run) => ['CREATED','STARTING','RUNNING','PAUSING','RESUMING','STOPPING'].includes(run.status)).length)} hint="Active QA work" tone="cyan" />
+        <MetricCard label="FINISHED" value={String(terminal.length)} hint="Completed, failed or stopped" tone="green" />
+        <MetricCard label="POD PROFILES" value={String(totalProfiles)} hint="Profiles across all pods" tone="violet" />
+        <MetricCard label="SUCCESS RATE" value={successRate} hint="Completed / terminal runs" tone="amber" />
       </section>
 
       <section className="dashboard-grid">

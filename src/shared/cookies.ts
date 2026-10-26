@@ -11,6 +11,7 @@ export interface QaCookieRecord {
   sameSite: QaCookieSameSite;
   expires?: number;
   enabled: boolean;
+  scope?: string | null;
   status?: 'active' | 'disabled' | 'expired';
   createdAt: string;
   lastUsedAt?: string;
@@ -26,4 +27,5 @@ export interface QaCookieDraft {
   sameSite?: QaCookieSameSite;
   expires?: number;
   enabled?: boolean;
+  scope?: string | null;
 }

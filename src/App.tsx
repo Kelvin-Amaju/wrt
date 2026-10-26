@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Sidebar, type PageKey } from './components/Sidebar';
 import { Topbar } from './components/Topbar';
 import { Dashboard } from './pages/Dashboard';
@@ -13,12 +13,16 @@ import { ProxyManager } from './pages/ProxyManager';
 import { ProxyIpHistory } from './pages/ProxyIpHistory';
 import { CookieManager } from './pages/CookieManager';
 import { Scheduler } from './pages/Scheduler';
+import { Pods } from './pages/pods';
+import { Warmer } from './pages/warmer';
 import './styles.css';
 
 const pageMeta: Record<PageKey, { title: string; eyebrow: string; description: string }> = {
   dashboard: { title: 'Dashboard', eyebrow: 'OVERVIEW', description: '' },
   run: { title: 'Run', eyebrow: 'QA ENGINE', description: 'Create controlled browser runs and queue sessions safely.' },
   runs: { title: 'Run Center', eyebrow: 'MULTI-RUN', description: 'Monitor, pause, resume, and stop independent QA runs.' },
+  pods: { title: 'Pods', eyebrow: 'PROFILE GROUPS', description: 'Create and manage persistent browser profiles.' },
+  warmer: { title: 'Warmer', eyebrow: 'PROFILE WARMER', description: 'Run controlled warming sessions for selected profiles.' },
   streaming: { title: 'Streaming Hub', eyebrow: 'STREAMING QA', description: 'Authorized playback, queue, catalog and account-session QA.' },
   'streaming-library': { title: 'Music Library', eyebrow: 'STREAMING QA', description: 'Import links and manage saved music from every supported platform in one place.' },
   'streaming-accounts': { title: 'Accounts', eyebrow: 'STREAMING QA', description: 'Manage authorized streaming logins, cookies, status checks, and network policy.' },
@@ -38,6 +42,16 @@ const pageMeta: Record<PageKey, { title: string; eyebrow: string; description: s
 export default function App() {
   const [page, setPage] = useState<PageKey>('dashboard');
   const [requestedRunId, setRequestedRunId] = useState<string | null>(null);
+  const [requestedPodId, setRequestedPodId] = useState<string | null>(null);
+  useEffect(() => {
+    const navigate = (event: Event) => {
+      const detail = (event as CustomEvent<{ page?: PageKey; podId?: string }>).detail;
+      if (detail?.page) setPage(detail.page);
+      setRequestedPodId(detail?.podId || null);
+    };
+    window.addEventListener('orbitqa:navigate', navigate);
+    return () => window.removeEventListener('orbitqa:navigate', navigate);
+  }, []);
   const meta = useMemo(() => pageMeta[page], [page]);
 
   return <div className="app-shell">
@@ -46,8 +60,10 @@ export default function App() {
       <Topbar title={meta.title} />
       <main className="content">
         {page === 'dashboard' ? <Dashboard />
-          : page === 'run' ? <Run />
+          : page === 'run' ? <Run podId={requestedPodId} />
           : page === 'runs' ? <RunCenter initialRunId={requestedRunId} onInitialRunHandled={() => setRequestedRunId(null)} />
+          : page === 'pods' ? <Pods />
+          : page === 'warmer' ? <Warmer initialPodId={requestedPodId} />
           : page === 'streaming' || page === 'streaming-library' || page === 'streaming-accounts' ? <StreamingHub view={page==='streaming-library'?'library':page==='streaming-accounts'?'accounts':'qa'} />
           : page === 'social' || page === 'social-accounts' ? <SocialHub view={page==='social-accounts'?'accounts':'qa'} />
           : page === 'proxies' ? <ProxyManager />

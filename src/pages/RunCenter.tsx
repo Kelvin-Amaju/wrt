@@ -46,13 +46,14 @@ function privacyRouteStatusLabel(status: PrivacyRouteIntegrityCheckStatus | 'pas
   return labels[status];
 }
 
-type RunLaneKind = 'run' | 'streaming' | 'social';
+type RunLaneKind = 'run' | 'streaming' | 'social' | 'warmer';
 const RUN_LANES: Array<{kind:RunLaneKind;title:string;subtitle:string}> = [
   {kind:'run',title:'RUN',subtitle:'Browser and device QA'},
   {kind:'streaming',title:'STREAMING HUB',subtitle:'Music streaming QA'},
   {kind:'social',title:'SOCIAL HUB',subtitle:'Social content QA'},
+  {kind:'warmer',title:'WARMER',subtitle:'Profile warming sessions'},
 ];
-function runLaneKind(run:RunSummary):RunLaneKind { return run.runKind==='streaming'?'streaming':run.runKind==='social'?'social':'run'; }
+function runLaneKind(run:RunSummary):RunLaneKind { return run.runKind==='streaming'?'streaming':run.runKind==='social'?'social':run.runKind==='warmer'?'warmer':'run'; }
 
 export function RunCenter({ initialRunId = null, onInitialRunHandled }: RunCenterProps = {}) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
@@ -74,8 +75,8 @@ export function RunCenter({ initialRunId = null, onInitialRunHandled }: RunCente
     try {
       const [next, nextAutoRerun, nextStuckRecovery] = await Promise.all([
         window.orbitqa.listQaRuns(),
-        window.orbitqa.getAutoRerunState?.(activeLane) ?? Promise.resolve(DEFAULT_AUTO_RERUN),
-        window.orbitqa.getStuckRunRecoveryState?.(activeLane) ?? Promise.resolve(DEFAULT_STUCK_RECOVERY),
+        activeLane === 'warmer' ? Promise.resolve(DEFAULT_AUTO_RERUN) : window.orbitqa.getAutoRerunState?.(activeLane) ?? Promise.resolve(DEFAULT_AUTO_RERUN),
+        activeLane === 'warmer' ? Promise.resolve(DEFAULT_STUCK_RECOVERY) : window.orbitqa.getStuckRunRecoveryState?.(activeLane) ?? Promise.resolve(DEFAULT_STUCK_RECOVERY),
       ]);
       setRuns(next);
       setAutoRerun(nextAutoRerun);
@@ -244,7 +245,7 @@ export function RunCenter({ initialRunId = null, onInitialRunHandled }: RunCente
     return { sessions:rows.length, checksPassed, checksNotApplicable, screenshots, networkVerified };
   }, [detail?.streamingResults]);
 
-  const cardProps = { onOpen:openRun, onStop:stopRun, onPause:pauseRun, onResume:resumeRun, onRerun:rerunRun, onDelete:deleteRun };
+  const cardProps = { onOpen:openRun, onStop:stopRun, onPause:activeLane === 'warmer' ? undefined : pauseRun, onResume:activeLane === 'warmer' ? undefined : resumeRun, onRerun:activeLane === 'warmer' ? undefined : rerunRun, onDelete:deleteRun };
 
   return (
     <div className="run-center-page">
@@ -280,7 +281,7 @@ export function RunCenter({ initialRunId = null, onInitialRunHandled }: RunCente
         <div><strong>{DELETE_SCOPE_LABELS[pendingBulkDelete]}?</strong><span>This removes {historyCount(pendingBulkDelete)} finished {laneLabel.toLowerCase()} record{historyCount(pendingBulkDelete) === 1 ? '' : 's'} only. Other Run Center tabs are not affected.</span></div>
         <div><button type="button" className="text-button" onClick={() => setPendingBulkDelete(null)}>Cancel</button><button type="button" className="danger-button" onClick={confirmBulkDelete}>CONFIRM {DELETE_SCOPE_LABELS[pendingBulkDelete].toUpperCase()}</button></div>
       </section>}
-      <section className="panel run-center-automation">
+      {activeLane !== 'warmer' && <section className="panel run-center-automation">
         <div className="run-center-automation__header">
           <div><span className="section-kicker">AUTOMATION</span><h3>Automatic Run Again</h3><p>Choose the exact finished {laneLabel.toLowerCase()} tasks that should repeat. Each tab owns its own automation queue and never starts tasks from another tab.</p></div>
           <label className="run-center-auto-switch"><input aria-label="Automatic Run Again" type="checkbox" checked={autoRerun.enabled} onChange={(event) => void updateAutoRerun({ enabled:event.target.checked })} /><span>{autoRerun.enabled ? 'ON' : 'OFF'}</span></label>
@@ -302,8 +303,8 @@ export function RunCenter({ initialRunId = null, onInitialRunHandled }: RunCente
           </div>
           <p className="run-center-automation__note">Completed only repeats a selected task only after a successful completion. All finished runs repeats selected tasks after Completed, Failed, or Stopped. Turning the master OFF clears the waiting queue but does not kill attempts already running.</p>
         </> : <p className="run-center-automation__note">Turn this on to choose which finished tasks should keep running again automatically.</p>}
-      </section>
-      <section className="panel run-center-automation run-center-recovery">
+      </section>}
+      {activeLane !== 'warmer' && <section className="panel run-center-automation run-center-recovery">
         <div className="run-center-automation__header">
           <div><span className="section-kicker">RECOVERY</span><h3>Stuck Run Auto-Recovery</h3><p>Automatically rescue stuck {laneLabel.toLowerCase()} work without touching runs in the other tabs.</p></div>
           <label className="run-center-auto-switch"><input aria-label="Stuck Run Auto-Recovery" type="checkbox" checked={stuckRecovery.enabled} onChange={(event) => void updateStuckRunRecovery({ enabled:event.target.checked })} /><span>{stuckRecovery.enabled ? 'ON' : 'OFF'}</span></label>
@@ -320,7 +321,7 @@ export function RunCenter({ initialRunId = null, onInitialRunHandled }: RunCente
           </div>
           <p className="run-center-automation__note">OrbitQA watches only the active tab. The recovery clock resets whenever that run reports progress. After the stuck timeout it stops that run and restarts the same logical task. Other tabs are never touched.</p>
         </> : <p className="run-center-automation__note">Turn this on to automatically recover stuck work in the selected tab after your chosen timeout.</p>}
-      </section>
+      </section>}
       <section className="run-center-layout">
         <div className="run-center-stacks">
           <section className="run-center-group">
