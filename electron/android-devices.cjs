@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const runtime = require('./android-runtime.cjs');
 const url = require('./android-url.cjs');
+const { reservedEmulatorPorts } = require('./android-service.cjs');
 
 const { AndroidRuntimeError, execAdb, execTool, sleep } = runtime;
 
@@ -40,6 +41,8 @@ function list() {
 function portsInUse() {
   const used = new Set();
   for (const entry of running.values()) used.add(entry.port);
+  // Ports already claimed by android-service launches in this process.
+  for (const port of reservedEmulatorPorts()) used.add(port);
   return used;
 }
 

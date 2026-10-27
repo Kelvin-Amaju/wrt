@@ -1,5 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
-import { IOS_DEVICE_PROFILES, iosBrowserLabel, type MobileStatus } from '../shared/mobileDevices';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  IOS_DEVICE_PROFILES,
+  REAL_DEVICE_FLEET_BASE,
+  iosBrowserLabel,
+  type MobileStatus,
+} from '../shared/mobileDevices';
 
 type ProfileTab = 'desktop' | 'android' | 'ios-local' | 'ios-real';
 
@@ -11,6 +16,10 @@ const EMPTY_STATUS: MobileStatus = {
   emulatorAvailable: false,
   avds: [],
   devices: [],
+  running: [],
+  runningSerials: [],
+  avdHome: '',
+  maxParallel: 20,
   error: null,
 };
 
@@ -18,6 +27,8 @@ export function DeviceProfiles() {
   const [tab, setTab] = useState<ProfileTab>('desktop');
   const [status, setStatus] = useState<MobileStatus>(EMPTY_STATUS);
   const [selectedAvd, setSelectedAvd] = useState('');
+  const [fleetCount, setFleetCount] = useState(3);
+  const [alwaysNew, setAlwaysNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -39,7 +50,7 @@ export function DeviceProfiles() {
           const mobile = await bridge!.getMobileStatus();
           if (disposed) return;
           setStatus(mobile);
-          setSelectedAvd(mobile.avds[0] || '');
+          setSelectedAvd((current) => current || mobile.avds[0] || '');
         }
         wasRunning = next.running;
       } catch (cause) {
@@ -61,12 +72,12 @@ export function DeviceProfiles() {
     finally { setBusy(false); }
   }
 
-  const runningEmulator = useMemo(
-    () => status.devices.find((device) => device.serial.startsWith('emulator-') && device.state === 'device'),
-    [status.devices],
+  const runningDevices = useMemo(
+    () => status.running.filter((device) => device.serial.startsWith('emulator-')),
+    [status.running],
   );
 
-  async function refreshAndroid() {
+  const refreshAndroid = useCallback(async () => {
     if (!window.orbitqa?.getMobileStatus) {
       setError('Android bridge is unavailable. Run Device Profiles inside OrbitQA Desktop.');
       return;
@@ -76,20 +87,18 @@ export function DeviceProfiles() {
     try {
       const next = await window.orbitqa.getMobileStatus();
       setStatus(next);
-      if (!selectedAvd && next.avds[0]) setSelectedAvd(next.avds[0]);
       if (next.error) setError(next.error);
+      setSelectedAvd((current) => current || next.avds[0] || '');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     if (tab === 'android') void refreshAndroid();
-    // Only refresh when the Android tab is intentionally opened.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, refreshAndroid]);
 
   async function launchSelectedAvd() {
     if (!selectedAvd || !window.orbitqa?.launchAvd) return;
@@ -97,8 +106,8 @@ export function DeviceProfiles() {
     setError('');
     setMessage(`Launching ${selectedAvd}…`);
     try {
-      const result = await window.orbitqa.launchAvd(selectedAvd);
-      setMessage(result.alreadyRunning ? `${selectedAvd} is already ready.` : `${selectedAvd} is ready.`);
+      const result = await window.orbitqa.launchAvd(selectedAvd, alwaysNew ? { reuse: false } : undefined);
+      setMessage(result.alreadyRunning ? `${selectedAvd} is already ready on ${result.serial}.` : `${selectedAvd} is ready on ${result.serial}.`);
       await refreshAndroid();
     } catch (cause) {
       setMessage('');
@@ -108,17 +117,48 @@ export function DeviceProfiles() {
     }
   }
 
-  async function stopRunningAvd() {
-    if (!runningEmulator || !window.orbitqa?.stopAvd) return;
+  async function launchFleet() {
+    if (!window.orbitqa?.launchAvdFleet) return;
+    const count = Math.max(1, Math.min(Number(fleetCount) || 1, status.maxParallel));
     setBusy(true);
     setError('');
-    setMessage(`Stopping ${runningEmulator.serial}…`);
+    setMessage(`Preparing ${count} virtual phone(s)…`);
     try {
-      await window.orbitqa.stopAvd(runningEmulator.serial);
-      setMessage('Android virtual phone stopped.');
+      const result = await window.orbitqa.launchAvdFleet({ count, baseName: REAL_DEVICE_FLEET_BASE });
+      setMessage(`${result.devices.length} virtual phone(s) ready: ${result.devices.map((device) => device.serial).join(', ')}`);
       await refreshAndroid();
     } catch (cause) {
       setMessage('');
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stopDevice(serial: string) {
+    if (!window.orbitqa?.stopAvd) return;
+    setBusy(true);
+    setError('');
+    try {
+      await window.orbitqa.stopAvd(serial);
+      setMessage(`${serial} stopped.`);
+      await refreshAndroid();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stopAllDevices() {
+    if (!window.orbitqa?.stopAllAvds) return;
+    setBusy(true);
+    setError('');
+    try {
+      const stopped = await window.orbitqa.stopAllAvds();
+      setMessage(stopped.length ? `Stopped ${stopped.length} virtual phone(s).` : 'No virtual phones were running.');
+      await refreshAndroid();
+    } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
@@ -131,7 +171,7 @@ export function DeviceProfiles() {
         <div>
           <span className="section-kicker">COMPATIBILITY LAB</span>
           <h2>Device checking profiles</h2>
-          <p>Run desktop browsers, a real Android virtual phone, local iOS compatibility profiles, or provider-backed real iOS devices from one workspace.</p>
+          <p>Run desktop browsers, real Android virtual phones in parallel, local iOS compatibility profiles, or provider-backed real iOS devices from one workspace.</p>
         </div>
         <span className="status-pill status-pill--soft"><i /> WINDOWS V1</span>
       </section>
@@ -184,7 +224,7 @@ export function DeviceProfiles() {
               <div><span>Android SDK</span><strong className={status.sdkPath ? 'ok' : 'bad'}>{status.sdkPath ? 'Detected' : 'Not detected'}</strong></div>
               <div><span>ADB</span><strong className={status.adbAvailable ? 'ok' : 'bad'}>{status.adbAvailable ? 'Ready' : 'Missing'}</strong></div>
               <div><span>Emulator</span><strong className={status.emulatorAvailable ? 'ok' : 'bad'}>{status.emulatorAvailable ? 'Ready' : 'Missing'}</strong></div>
-              <div><span>Device state</span><strong className={runningEmulator ? 'ok' : ''}>{runningEmulator ? `Ready · ${runningEmulator.serial}` : 'Stopped'}</strong></div>
+              <div><span>Running</span><strong className={runningDevices.length ? 'ok' : ''}>{runningDevices.length ? `${runningDevices.length} of ${status.maxParallel}` : 'Stopped'}</strong></div>
             </div>
 
             {status.sdkPath && <div className="path-box"><span>SDK path</span><code>{status.sdkPath}</code></div>}
@@ -197,19 +237,60 @@ export function DeviceProfiles() {
             ) : status.avds.length === 0 ? (
               <div className="setup-card">
                 <strong>No Android virtual devices found</strong>
-                <p>Use the setup below to download the Android image and create your virtual phone.</p>
+                <p>Use the setup below to download the Android image, then launch a fleet to create your virtual phones.</p>
               </div>
             ) : (
-              <div className="avd-control-row">
-                <label className="field">
-                  <span>Installed virtual phone</span>
-                  <select aria-label="Android virtual device" value={selectedAvd} onChange={(event) => setSelectedAvd(event.target.value)}>
-                    {status.avds.map((avd) => <option key={avd} value={avd}>{avd}</option>)}
-                  </select>
-                </label>
-                <button className="primary-button" type="button" onClick={() => void launchSelectedAvd()} disabled={busy || setup.running || !selectedAvd}>Launch Virtual Phone</button>
-                <button className="danger-button" type="button" onClick={() => void stopRunningAvd()} disabled={busy || setup.running || !runningEmulator}>Stop Virtual Phone</button>
-              </div>
+              <>
+                <div className="avd-control-row">
+                  <label className="field">
+                    <span>Installed virtual phone</span>
+                    <select aria-label="Android virtual device" value={selectedAvd} onChange={(event) => setSelectedAvd(event.target.value)}>
+                      {status.avds.map((avd) => <option key={avd} value={avd}>{avd}</option>)}
+                    </select>
+                  </label>
+                  <button className="primary-button" type="button" onClick={() => void launchSelectedAvd()} disabled={busy || setup.running || !selectedAvd}>Launch Virtual Phone</button>
+                  <label className="check-row">
+                    <input type="checkbox" checked={alwaysNew} onChange={(event) => setAlwaysNew(event.target.checked)} />
+                    <span>Always start a new instance</span>
+                  </label>
+                </div>
+
+                <div className="avd-control-row">
+                  <label className="field">
+                    <span>Parallel fleet size (max {status.maxParallel})</span>
+                    <input
+                      aria-label="Parallel fleet size"
+                      type="number"
+                      min={1}
+                      max={status.maxParallel}
+                      value={fleetCount}
+                      onChange={(event) => setFleetCount(Number(event.target.value))}
+                    />
+                  </label>
+                  <button className="primary-button" type="button" onClick={() => void launchFleet()} disabled={busy || setup.running}>Create &amp; Launch Fleet</button>
+                  <button className="danger-button" type="button" onClick={() => void stopAllDevices()} disabled={busy || setup.running || runningDevices.length === 0}>Stop All</button>
+                </div>
+
+                {runningDevices.length > 0 && (
+                  <table className="pod-profile-table">
+                    <thead>
+                      <tr><th>Serial</th><th>Virtual phone</th><th>State</th><th /></tr>
+                    </thead>
+                    <tbody>
+                      {runningDevices.map((device) => (
+                        <tr key={device.serial}>
+                          <td><code>{device.serial}</code></td>
+                          <td>{device.avdName || 'unknown'}</td>
+                          <td><span className="status-pill status-pill--soft">{device.state}</span></td>
+                          <td>
+                            <button className="secondary-button" type="button" onClick={() => void stopDevice(device.serial)} disabled={busy}>Stop</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
             )}
 
             <div className="setup-card">
@@ -229,12 +310,13 @@ export function DeviceProfiles() {
           <article className="panel android-note-panel">
             <span className="section-kicker">NATIVE RUNTIME FIDELITY</span>
             <h3>Native Android runtime</h3>
-            <p>OrbitQA controls Chrome inside an ADB-connected Android emulator. The emulator window is a real Android virtual device, not a desktop viewport pretending to be a phone.</p>
+            <p>OrbitQA controls Chrome inside ADB-connected Android emulators. Each emulator window is a real Android virtual device with its own writable disk, not a desktop viewport pretending to be a phone.</p>
             <ul>
+              <li>Fleet members are separate AVDs, so cookies and history never collide between virtual phones.</li>
               <li>ADB recovery checks common offline emulator states before launch.</li>
               <li>Cold-start-safe launch avoids loading a potentially corrupted quick-boot snapshot.</li>
-              <li>Chrome readiness is verified before OrbitQA reports the virtual phone as ready.</li>
-              <li>One virtual phone at a time to stay lightweight.</li>
+              <li>Launches are serialised so parallel starts never fight over a console port.</li>
+              <li>Every fleet member keeps the Pixel 7 retail build fingerprint.</li>
             </ul>
           </article>
         </section>

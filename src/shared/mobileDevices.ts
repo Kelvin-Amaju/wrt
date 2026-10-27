@@ -4,6 +4,12 @@ export type IosOrientation = 'portrait' | 'landscape';
 export type DiagnosticStatus = 'pass' | 'warning';
 
 export type AndroidDeviceState = { serial: string; state: string };
+export type AndroidRunningDevice = { serial: string; state: string; avdName: string };
+
+/**
+ * Payload returned by `mobile:getStatus`. Must stay byte-compatible with the
+ * object built in electron/android-service.cjs -> getStatus().
+ */
 export type MobileStatus = {
   sdkPath: string | null;
   adbPath: string | null;
@@ -12,7 +18,18 @@ export type MobileStatus = {
   emulatorAvailable: boolean;
   avds: string[];
   devices: AndroidDeviceState[];
+  running: AndroidRunningDevice[];
+  runningSerials: string[];
+  avdHome: string;
+  maxParallel: number;
   error: string | null;
+};
+
+export type AndroidFleetRequest = {
+  count: number;
+  baseName?: string;
+  ensure?: boolean;
+  reuse?: boolean;
 };
 
 export type IosDeviceProfile = {
@@ -90,16 +107,19 @@ export function findAndroidEmulationProfile(name?: string): AndroidEmulationProf
  */
 export const REAL_DEVICE_AVDS: string[] = ['OrbitQA_Pixel_7_Real'];
 
+/** Base name used by the parallel AVD fleet (OrbitQA_Pixel_7_Real_01 .. _NN). */
+export const REAL_DEVICE_FLEET_BASE = 'OrbitQA_Pixel_7_Real';
+
 function normalizeAvdName(value: string): string {
   return String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/[_\-.]+/g, ' ')
+    .replace(/[_\-.]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-/** True when an AVD name is a hardened retail-device profile. */
+/** True when an AVD name is a hardened retail-device profile, including fleet members. */
 export function isHardenedAvd(name: string): boolean {
   const key = normalizeAvdName(name);
   if (!key) return false;

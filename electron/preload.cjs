@@ -28,12 +28,27 @@ contextBridge.exposeInMainWorld('orbitqa', {
   deleteScheduledTask: (id) => ipcRenderer.invoke('scheduler:delete', id),
   setScheduledTaskEnabled: (id, enabled) => ipcRenderer.invoke('scheduler:setEnabled', id, enabled),
   runScheduledTaskNow: (id) => ipcRenderer.invoke('scheduler:runNow', id),
+
+  // Android virtual devices
   getMobileStatus: () => ipcRenderer.invoke('mobile:getStatus'),
   startAndroidSetup: () => ipcRenderer.invoke('mobile:startSetup'),
   getAndroidSetupState: () => ipcRenderer.invoke('mobile:getSetupState'),
   listAvds: () => ipcRenderer.invoke('mobile:listAvds'),
-  launchAvd: (name) => ipcRenderer.invoke('mobile:launchAvd', name),
+  launchAvd: (name, options) => ipcRenderer.invoke('mobile:launchAvdEx', name, options),
   stopAvd: (serial) => ipcRenderer.invoke('mobile:stopAvd', serial),
+  launchAvdFleet: (options) => ipcRenderer.invoke('mobile:launchFleet', options),
+  stopAllAvds: () => ipcRenderer.invoke('mobile:stopAllAvds'),
+  listRunningAvds: () => ipcRenderer.invoke('mobile:listRunningAvds'),
+  getAvdMaxParallel: () => ipcRenderer.invoke('mobile:maxParallel'),
+  // Legacy clone-per-device lane
+  createMobileDevice: (options) => ipcRenderer.invoke('mobile:createDevice', options),
+  listMobileDevices: () => ipcRenderer.invoke('mobile:listRunning'),
+  stopAllMobileDevices: () => ipcRenderer.invoke('mobile:stopAll'),
+  openMobileUrl: (serial, targetUrl) => ipcRenderer.invoke('mobile:openUrl', serial, targetUrl),
+  getMobileDeviceStatus: (serial) => ipcRenderer.invoke('mobile:getDeviceStatus', serial),
+  isMobileChromeReady: (serial) => ipcRenderer.invoke('mobile:isChromeReady', serial),
+  getMobileMaxDevices: () => ipcRenderer.invoke('mobile:maxDevices'),
+
   getRealIosProviderConfig: () => ipcRenderer.invoke('realIos:getConfig'),
   saveRealIosProviderConfig: (request) => ipcRenderer.invoke('realIos:saveConfig', request),
   checkRealIosProvider: () => ipcRenderer.invoke('realIos:checkConnection'),
