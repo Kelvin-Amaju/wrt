@@ -1,66 +1,191 @@
 const net = require('node:net');
 
-async function installStrictPrivacyGuard(context, strictMode) {
+const GUARD_FLAG = '__orbitqaStrictGuardBlocked';
+const BLOCKED_MARKER = '__orbitqaStrictBlocked';
+const GUARDED_PERMISSIONS = ['camera', 'microphone', 'geolocation', 'notifications'];
+
+// Runs as an init script in the main world before any site code, on every document.
+function strictPrivacyGuardSource(options) {
+  const config = options && typeof options === 'object' ? options : {};
+  const spoof = config.geolocation && Number.isFinite(Number(config.geolocation.latitude))
+    && Number.isFinite(Number(config.geolocation.longitude))
+    ? {
+        latitude: Number(config.geolocation.latitude),
+        longitude: Number(config.geolocation.longitude),
+        accuracy: Number.isFinite(Number(config.geolocation.accuracy)) ? Number(config.geolocation.accuracy) : 20,
+      }
+    : null;
+
+  const deniedError = () => new DOMException('Blocked by OrbitQA Strict Privacy Mode', 'NotAllowedError');
+  const deniedPositionError = () => {
+    const error = { code: 1, message: 'Blocked by OrbitQA Strict Privacy Mode' };
+    try { Object.defineProperty(error, 'PERMISSION_DENIED', { value: 1 }); } catch { error.PERMISSION_DENIED = 1; }
+    return error;
+  };
+  const spoofedPosition = () => ({
+    coords: {
+      latitude: spoof.latitude,
+      longitude: spoof.longitude,
+      accuracy: spoof.accuracy,
+      altitude: null,
+      altitudeAccuracy: null,
+      heading: null,
+      speed: null,
+    },
+    timestamp: Date.now(),
+  });
+
+  const define = (target, key, value) => {
+    if (!target) return false;
+    try {
+      Object.defineProperty(target, key, { configurable: true, writable: true, value });
+      return true;
+    } catch {
+      try { target[key] = value; return true; } catch { return false; }
+    }
+  };
+
+  const markBlocked = (fn) => {
+    try { Object.defineProperty(fn, BLOCKED_MARKER, { configurable: true, value: true }); } catch { /* marker is best effort */ }
+    return fn;
+  };
+
+  // The engine may hand back a brand new instance for navigator.geolocation on every
+  // access, so an own property written on the object captured at document-start is not
+  // guaranteed to be the object a later access returns. Writing to the shared prototype
+  // always is. Do both: the instance for stable objects, the prototype for lazy ones.
+  const defineGuarded = (object, key, fn) => {
+    if (!object) return null;
+    const guarded = markBlocked(fn);
+    define(object, key, guarded);
+    let prototype = null;
+    try { prototype = Object.getPrototypeOf(object); } catch { prototype = null; }
+    if (prototype && prototype !== object && prototype !== Object.prototype && prototype !== Function.prototype) {
+      define(prototype, key, guarded);
+    }
+    return guarded;
+  };
+
+  const blocked = { camera: false, microphone: false, geolocation: false, notifications: false };
+
+  const media = globalThis.navigator && navigator.mediaDevices;
+  if (media && typeof media.getUserMedia === 'function') {
+    defineGuarded(media, 'getUserMedia', async () => { throw deniedError(); });
+    blocked.camera = true;
+    blocked.microphone = true;
+  }
+
+  const geo = globalThis.navigator && navigator.geolocation;
+  if (geo && typeof geo.getCurrentPosition === 'function') {
+    if (spoof) {
+      defineGuarded(geo, 'getCurrentPosition', (success) => {
+        if (typeof success === 'function') success(spoofedPosition());
+      });
+      defineGuarded(geo, 'watchPosition', (success) => {
+        if (typeof success === 'function') success(spoofedPosition());
+        return 0;
+      });
+    } else {
+      const deny = (_success, error) => { if (typeof error === 'function') error(deniedPositionError()); };
+      defineGuarded(geo, 'getCurrentPosition', deny);
+      defineGuarded(geo, 'watchPosition', (_success, error) => { deny(_success, error); return 0; });
+    }
+    blocked.geolocation = true;
+  }
+
+  if (typeof globalThis.Notification !== 'undefined') {
+    defineGuarded(Notification, 'requestPermission', async () => 'denied');
+    try { Object.defineProperty(Notification, 'permission', { configurable: true, get: () => 'denied' }); } catch { /* requestPermission remains blocked */ }
+    blocked.notifications = true;
+  }
+
+  // Keep the Permissions API consistent with what getCurrentPosition actually does.
+  const permissions = globalThis.navigator && navigator.permissions;
+  if (permissions && typeof permissions.query === 'function') {
+    const nativeQuery = permissions.query.bind(permissions);
+    defineGuarded(permissions, 'query', (descriptor) => {
+      const name = descriptor && descriptor.name;
+      if (!GUARDED_PERMISSIONS.includes(name)) return nativeQuery(descriptor);
+      const state = name === 'geolocation' && spoof ? 'granted' : 'denied';
+      return Promise.resolve(nativeQuery(descriptor))
+        .then((status) => {
+          try {
+            return new Proxy(status, {
+              get: (target, property) => {
+                if (property === 'state') return state;
+                const value = Reflect.get(target, property, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+              set: (target, property, value) => {
+                try { target[property] = value; } catch { /* readonly status */ }
+                return true;
+              },
+            });
+          } catch {
+            return status;
+          }
+        })
+        .catch(() => nativeQuery(descriptor));
+    });
+  }
+
+  // Identity-independent marker: survives instance recreation and prototype swaps.
+  try {
+    Object.defineProperty(globalThis, GUARD_FLAG, {
+      configurable: true,
+      value: Object.freeze({ ...blocked, spoofed: Boolean(spoof), version: 2 }),
+    });
+  } catch { /* the per-function marker remains */ }
+}
+
+async function installStrictPrivacyGuard(context, strictMode, options) {
   if (!strictMode) return;
   if (!context || typeof context.addInitScript !== 'function') {
     throw new Error('Strict Privacy Mode is unavailable in this browser context');
   }
-  await context.addInitScript(() => {
-    const deniedError = () => new DOMException('Blocked by OrbitQA Strict Privacy Mode', 'NotAllowedError');
-    const define = (target, key, value) => {
-      if (!target) return;
-      try {
-        Object.defineProperty(target, key, { configurable: true, writable: true, value });
-      } catch {
-        try { target[key] = value; } catch { /* best effort; diagnostics fail closed */ }
-      }
-    };
-    const markBlocked = (fn) => {
-      try { Object.defineProperty(fn, '__orbitqaStrictBlocked', { value: true }); } catch { /* non-essential marker */ }
-      return fn;
-    };
-
-    // WebRTC is deliberately not replaced or hidden. Browser-supported network
-    // policy is applied at launch where available, then ICE is verified at runtime.
-    if (navigator.mediaDevices?.getUserMedia) {
-      define(navigator.mediaDevices, 'getUserMedia', markBlocked(async () => { throw deniedError(); }));
-    }
-
-    if (navigator.geolocation) {
-      define(navigator.geolocation, 'getCurrentPosition', markBlocked((_success, error) => {
-        if (typeof error === 'function') error({ code: 1, message: 'Blocked by OrbitQA Strict Privacy Mode', PERMISSION_DENIED: 1 });
-      }));
-      define(navigator.geolocation, 'watchPosition', markBlocked((_success, error) => {
-        if (typeof error === 'function') error({ code: 1, message: 'Blocked by OrbitQA Strict Privacy Mode', PERMISSION_DENIED: 1 });
-        return 0;
-      }));
-    }
-
-    if (typeof Notification !== 'undefined') {
-      define(Notification, 'requestPermission', markBlocked(async () => 'denied'));
-      try {
-        Object.defineProperty(Notification, 'permission', { configurable: true, get: () => 'denied' });
-      } catch { /* requestPermission remains blocked */ }
-    }
-  });
+  await context.addInitScript(strictPrivacyGuardSource, options || {});
 }
 
 async function collectStrictPrivacyGuardState(page) {
   return page.evaluate(() => {
-    const isBlocked = (fn) => Boolean(fn && fn.__orbitqaStrictBlocked === true);
+    const flag = globalThis.__orbitqaStrictGuardBlocked || null;
+    const flagged = (key) => Boolean(flag && flag[key] === true);
+    const isMarked = (fn) => Boolean(fn && fn.__orbitqaStrictBlocked === true);
+
     const rtc = globalThis.RTCPeerConnection || globalThis.webkitRTCPeerConnection;
-    const media = navigator.mediaDevices?.getUserMedia;
-    const geo = navigator.geolocation?.getCurrentPosition;
-    const notificationRequest = typeof Notification === 'undefined' ? undefined : Notification.requestPermission;
+    const media = globalThis.navigator && navigator.mediaDevices ? navigator.mediaDevices.getUserMedia : undefined;
+    const geoObject = globalThis.navigator ? navigator.geolocation : undefined;
+    const geo = geoObject ? geoObject.getCurrentPosition : undefined;
+    const notificationRequest = typeof globalThis.Notification === 'undefined' ? undefined : Notification.requestPermission;
+
+    // Behavioural probe: the guard answers synchronously, a native prompt does not.
+    // This cannot be defeated by object identity, and unlike a marker it proves the
+    // replacement is actually reachable from a fresh access.
+    let geolocationAnswersSynchronously = false;
+    if (typeof geo === 'function') {
+      try {
+        geo.call(geoObject, () => { geolocationAnswersSynchronously = true; }, () => { geolocationAnswersSynchronously = true; });
+      } catch {
+        geolocationAnswersSynchronously = false;
+      }
+    }
+
+    const stateOf = (key, fn, verified) => {
+      if (!fn) return 'unsupported';
+      if (flagged(key) || isMarked(fn) || verified) return 'denied';
+      return 'prompt';
+    };
+
+    const notificationState = typeof globalThis.Notification === 'undefined'
+      ? 'unsupported'
+      : stateOf('notifications', notificationRequest, false);
 
     return {
       webrtc: !rtc ? 'unsupported' : 'available',
-      camera: !media ? 'unsupported' : isBlocked(media) ? 'denied' : 'prompt',
-      microphone: !media ? 'unsupported' : isBlocked(media) ? 'denied' : 'prompt',
-      geolocation: !geo ? 'unsupported' : isBlocked(geo) ? 'denied' : 'prompt',
-      notifications: typeof Notification === 'undefined'
-        ? 'unsupported'
-        : isBlocked(notificationRequest) ? 'denied' : (Notification.permission || 'prompt'),
+      camera: stateOf('camera', media, false),
+      microphone: stateOf('microphone', media, false),
+      geolocation: stateOf('geolocation', geo, geolocationAnswersSynchronously),
+      notifications: notificationState === 'denied' ? 'denied' : (Notification.permission || 'prompt'),
     };
   });
 }
@@ -244,8 +369,6 @@ function classifyWebRtcPolicy({ supported, literalIpCandidates, verificationErro
   if (!supported) return 'unsupported';
   if (verificationError) return 'indeterminate';
   if (proxyRequired && directIp && (literalIpCandidates || []).includes(directIp)) return 'exposed';
-  // In strict proxy-only mode OrbitQA intentionally does not contact the host direct route.
-  // The Chromium non-proxied-UDP policy is therefore the fail-closed WebRTC control.
   if (preventionApplied) return 'prevented';
   if (proxyRequired && !directIp) return 'indeterminate';
   return 'verified-no-leak';

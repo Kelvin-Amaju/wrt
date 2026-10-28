@@ -25,11 +25,32 @@ export type MobileStatus = {
   error: string | null;
 };
 
+export type AndroidSetupState = {
+  running: boolean;
+  phase: string;
+  log: string;
+  error: string | null;
+};
+
 export type AndroidFleetRequest = {
   count: number;
   baseName?: string;
   ensure?: boolean;
   reuse?: boolean;
+};
+
+export type AvdLaunchResult = {
+  serial: string;
+  state: string;
+  alreadyRunning: boolean;
+  name: string;
+  port: number;
+};
+
+export type AvdFleetResult = {
+  baseName: string;
+  count: number;
+  devices: AvdLaunchResult[];
 };
 
 export type IosDeviceProfile = {

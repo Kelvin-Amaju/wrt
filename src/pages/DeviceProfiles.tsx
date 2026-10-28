@@ -5,6 +5,7 @@ import {
   iosBrowserLabel,
   type MobileStatus,
 } from '../shared/mobileDevices';
+import { androidBridge, type AndroidSetupState } from '../shared/androidBridge';
 
 type ProfileTab = 'desktop' | 'android' | 'ios-local' | 'ios-real';
 
@@ -23,6 +24,8 @@ const EMPTY_STATUS: MobileStatus = {
   error: null,
 };
 
+const IDLE_SETUP: AndroidSetupState = { running: false, phase: 'idle', log: '', error: null };
+
 export function DeviceProfiles() {
   const [tab, setTab] = useState<ProfileTab>('desktop');
   const [status, setStatus] = useState<MobileStatus>(EMPTY_STATUS);
@@ -32,11 +35,11 @@ export function DeviceProfiles() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [setup, setSetup] = useState<{ running: boolean; phase: string; log: string; error: string | null }>({ running: false, phase: 'idle', log: '', error: null });
+  const [setup, setSetup] = useState<AndroidSetupState>(IDLE_SETUP);
   const [acceptTerms, setAcceptTerms] = useState(false);
 
   useEffect(() => {
-    const bridge = window.orbitqa;
+    const bridge = androidBridge();
     if (tab !== 'android' || !bridge?.getAndroidSetupState) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -63,11 +66,12 @@ export function DeviceProfiles() {
   }, [tab]);
 
   async function setupAndroid() {
-    if (!acceptTerms || !window.orbitqa?.startAndroidSetup) return;
+    const bridge = androidBridge();
+    if (!acceptTerms || !bridge?.startAndroidSetup) return;
     setBusy(true);
     setError('');
     setMessage('');
-    try { setSetup(await window.orbitqa.startAndroidSetup()); }
+    try { setSetup(await bridge.startAndroidSetup()); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
@@ -78,14 +82,15 @@ export function DeviceProfiles() {
   );
 
   const refreshAndroid = useCallback(async () => {
-    if (!window.orbitqa?.getMobileStatus) {
+    const bridge = androidBridge();
+    if (!bridge?.getMobileStatus) {
       setError('Android bridge is unavailable. Run Device Profiles inside OrbitQA Desktop.');
       return;
     }
     setBusy(true);
     setError('');
     try {
-      const next = await window.orbitqa.getMobileStatus();
+      const next = await bridge.getMobileStatus();
       setStatus(next);
       if (next.error) setError(next.error);
       setSelectedAvd((current) => current || next.avds[0] || '');
@@ -101,12 +106,13 @@ export function DeviceProfiles() {
   }, [tab, refreshAndroid]);
 
   async function launchSelectedAvd() {
-    if (!selectedAvd || !window.orbitqa?.launchAvd) return;
+    const bridge = androidBridge();
+    if (!selectedAvd || !bridge?.launchAvd) return;
     setBusy(true);
     setError('');
     setMessage(`Launching ${selectedAvd}…`);
     try {
-      const result = await window.orbitqa.launchAvd(selectedAvd, alwaysNew ? { reuse: false } : undefined);
+      const result = await bridge.launchAvd(selectedAvd, alwaysNew ? { reuse: false } : undefined);
       setMessage(result.alreadyRunning ? `${selectedAvd} is already ready on ${result.serial}.` : `${selectedAvd} is ready on ${result.serial}.`);
       await refreshAndroid();
     } catch (cause) {
@@ -118,13 +124,14 @@ export function DeviceProfiles() {
   }
 
   async function launchFleet() {
-    if (!window.orbitqa?.launchAvdFleet) return;
+    const bridge = androidBridge();
+    if (!bridge?.launchAvdFleet) return;
     const count = Math.max(1, Math.min(Number(fleetCount) || 1, status.maxParallel));
     setBusy(true);
     setError('');
     setMessage(`Preparing ${count} virtual phone(s)…`);
     try {
-      const result = await window.orbitqa.launchAvdFleet({ count, baseName: REAL_DEVICE_FLEET_BASE });
+      const result = await bridge.launchAvdFleet({ count, baseName: REAL_DEVICE_FLEET_BASE });
       setMessage(`${result.devices.length} virtual phone(s) ready: ${result.devices.map((device) => device.serial).join(', ')}`);
       await refreshAndroid();
     } catch (cause) {
@@ -136,11 +143,12 @@ export function DeviceProfiles() {
   }
 
   async function stopDevice(serial: string) {
-    if (!window.orbitqa?.stopAvd) return;
+    const bridge = androidBridge();
+    if (!bridge?.stopAvd) return;
     setBusy(true);
     setError('');
     try {
-      await window.orbitqa.stopAvd(serial);
+      await bridge.stopAvd(serial);
       setMessage(`${serial} stopped.`);
       await refreshAndroid();
     } catch (cause) {
@@ -151,11 +159,12 @@ export function DeviceProfiles() {
   }
 
   async function stopAllDevices() {
-    if (!window.orbitqa?.stopAllAvds) return;
+    const bridge = androidBridge();
+    if (!bridge?.stopAllAvds) return;
     setBusy(true);
     setError('');
     try {
-      const stopped = await window.orbitqa.stopAllAvds();
+      const stopped = await bridge.stopAllAvds();
       setMessage(stopped.length ? `Stopped ${stopped.length} virtual phone(s).` : 'No virtual phones were running.');
       await refreshAndroid();
     } catch (cause) {

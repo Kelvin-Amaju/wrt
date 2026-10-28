@@ -78,6 +78,7 @@ const {
   waitBeforePageInteraction,
 } = require("./mandatory-interaction-delay.cjs");
 const deviceHardening = require("./device-hardening.cjs");
+const desktopHardening = require("./desktop-hardening.cjs");
 
 const SUPPORTED_BROWSERS = new Set([
   "chrome-installed",
@@ -3389,6 +3390,7 @@ async function executeMatrixQaRun({
         let activeWorkerGeo = null;
         let activeContextValidation = null;
         let emulationHardening = null;
+        let desktopPlan = null;
 
         const cleanupBrowserAttempt = async (reason = "retry-cleanup") => {
           if (lifetime && !lifetime.reason)
@@ -3414,6 +3416,7 @@ async function executeMatrixQaRun({
           runtimeProxyObservation = null;
           initialProxyObservation = null;
           emulationHardening = null;
+          desktopPlan = null;
         };
 
         const webRtcLaunchPolicy = buildWebRtcLaunchPolicy({
@@ -3509,8 +3512,11 @@ async function executeMatrixQaRun({
             contextValidation: workerContextValidation,
           });
 
-          // Android mobile emulation runs on the host browser, so it needs the same
-          // browser-layer hardening as an AVD.
+          // Host-browser hardening.
+          // Android mobile emulation gets the AVD-parity device profile. Desktop
+          // Chromium gets the desktop counterpart so the automation-flag and
+          // runtime-fingerprint gates are cleared there too. WebKit (Local iOS) is
+          // skipped on purpose: iOS Safari has no window.chrome.
           if (settings.deviceMode === "android-emulation") {
             emulationHardening = deviceHardening.prepareHardening({
               deviceMode: settings.deviceMode,
@@ -3519,6 +3525,18 @@ async function executeMatrixQaRun({
             });
             if (emulationHardening.active)
               Object.assign(contextOptions, emulationHardening.contextOptions);
+          } else if (
+            settings.deviceMode === "desktop" &&
+            browserEngine === "chromium"
+          ) {
+            desktopPlan = desktopHardening.prepareDesktopHardening({
+              browserEngine,
+              contextOptions,
+              locale: settings.locale,
+              timezoneId: settings.timezoneId,
+            });
+            if (desktopPlan.active)
+              Object.assign(contextOptions, desktopPlan.contextOptions);
           }
 
           // NOTE: the browser has not been launched yet at this point, so the context
@@ -3536,7 +3554,9 @@ async function executeMatrixQaRun({
           // hardening switches have to be merged into the launch options explicitly.
           const hardeningLaunchArgs = emulationHardening?.active
             ? deviceHardening.buildHardeningArgs(emulationHardening.profile)
-            : [];
+            : desktopPlan?.active
+              ? desktopHardening.buildDesktopLaunchArgs()
+              : [];
           const launchOptions = { headless: normalized.headless };
           if (
             browserEngine === "chromium" &&
@@ -3545,6 +3565,13 @@ async function executeMatrixQaRun({
             launchOptions.chromiumSandbox = true;
           if (runtimeLaunch.executablePath)
             launchOptions.executablePath = runtimeLaunch.executablePath;
+          if (
+            (emulationHardening?.active || desktopPlan?.active) &&
+            browserEngine === "chromium"
+          )
+            launchOptions.ignoreDefaultArgs = [
+              ...desktopHardening.IGNORE_DEFAULT_ARGS,
+            ];
           if (
             webRtcLaunchPolicy.args.length > 0 ||
             proxyContainmentPolicy.args.length > 0 ||
@@ -3629,6 +3656,7 @@ async function executeMatrixQaRun({
               // first navigation, so it wins the last write for webdriver / UA / WebGL.
               if (emulationHardening?.active)
                 await emulationHardening.afterCreate(context);
+              if (desktopPlan?.active) await desktopPlan.afterCreate(context);
               if (
                 workUnit.useCookies === true &&
                 cookieStore?.pickAny &&
@@ -4033,6 +4061,24 @@ async function executeMatrixQaRun({
               ? "Device hardening passed all three checks (automation flag, runtime fingerprint, device identity)"
               : `Device hardening incomplete: ${failedChecks.join(", ")}`,
             deviceHardening: hardeningReport,
+          });
+        } else if (desktopPlan?.active) {
+          const hardeningReport = await runNavigationResilientProbe(
+            page,
+            "desktop hardening diagnostics",
+            pushWork,
+            lifetime,
+            () => desktopHardening.collectDesktopHardeningReport(page),
+          );
+          const failedChecks = hardeningReport.checks
+            .filter((check) => !check.pass)
+            .map((check) => check.id);
+          pushWork({
+            type: desktopHardening.HARDENING_EVENT,
+            message: hardeningReport.passed
+              ? "Desktop hardening passed all three checks (automation flag, runtime fingerprint, device identity)"
+              : `Desktop hardening incomplete: ${failedChecks.join(", ")}`,
+            desktopHardening: hardeningReport,
           });
         }
         const preBehaviorIntegrity = emitPrivacyRouteIntegrity({
@@ -4478,6 +4524,7 @@ async function executeQaRun({
         let resolver;
         let legacyIdentityBaseline = null;
         let legacyIdentityReport = null;
+        let legacyDesktopPlan = null;
         let poolAllocation = null;
         let effectiveProxySource = normalized.proxySource;
         let runtimeProxy = normalized.privacy.proxy;
@@ -4575,6 +4622,23 @@ async function executeQaRun({
             throw new Error(
               `Worker identity is inconsistent: ${legacyContextValidation.issues.join(", ")}`,
             );
+          // Desktop host-browser hardening. Chromium only: WebKit iOS has no window.chrome.
+          if (
+            normalized.deviceMode === "desktop" &&
+            legacyBrowserEngine === "chromium"
+          ) {
+            legacyDesktopPlan = desktopHardening.prepareDesktopHardening({
+              browserEngine: legacyBrowserEngine,
+              contextOptions,
+              locale: normalized.locale,
+              timezoneId: normalized.timezoneId,
+            });
+            if (legacyDesktopPlan.active)
+              Object.assign(contextOptions, legacyDesktopPlan.contextOptions);
+          }
+          const legacyHardeningArgs = legacyDesktopPlan?.active
+            ? desktopHardening.buildDesktopLaunchArgs()
+            : [];
           const proxyContainmentPolicy = buildProxyContainmentLaunchPolicy({
             proxyRequired: Boolean(runtimeProxy.enabled),
             browserEngine: legacyBrowserEngine,
@@ -4584,10 +4648,15 @@ async function executeQaRun({
             browserEngine: legacyBrowserEngine,
           });
           const launchOptions = { headless: normalized.headless };
+          if (legacyDesktopPlan?.active)
+            launchOptions.ignoreDefaultArgs = [
+              ...desktopHardening.IGNORE_DEFAULT_ARGS,
+            ];
           if (
             webRtcLaunchPolicy.args.length > 0 ||
             proxyContainmentPolicy.args.length > 0 ||
             performancePolicy.args.length > 0 ||
+            legacyHardeningArgs.length > 0 ||
             (normalized.executionMode === "background" &&
               legacyBrowserEngine === "chromium")
           )
@@ -4595,6 +4664,7 @@ async function executeQaRun({
               webRtcLaunchPolicy.args,
               proxyContainmentPolicy.args,
               performancePolicy.args,
+              legacyHardeningArgs,
               normalized.executionMode === "background" &&
                 legacyBrowserEngine === "chromium"
                 ? [
@@ -4632,6 +4702,10 @@ async function executeQaRun({
           }
 
           context = await browser.newContext(contextOptions);
+          // Apply the desktop hardening init script before the first navigation so it
+          // wins the last write for navigator.webdriver and the chrome.* stubs.
+          if (legacyDesktopPlan?.active)
+            await legacyDesktopPlan.afterCreate(context);
           const trackedLegacyContext = context;
           unregisterContextResource =
             runResourceTracker?.register?.(runId, {
@@ -4897,6 +4971,26 @@ async function executeQaRun({
             throw new Error(
               `Device identity consistency blocked this work unit: ${legacyIdentityReport.blockingReasons.join(", ")}`,
             );
+
+          if (legacyDesktopPlan?.active) {
+            const hardeningReport = await runNavigationResilientProbe(
+              page,
+              "desktop hardening diagnostics",
+              pushWork,
+              lifetime,
+              () => desktopHardening.collectDesktopHardeningReport(page),
+            );
+            const failedChecks = hardeningReport.checks
+              .filter((check) => !check.pass)
+              .map((check) => check.id);
+            pushWork({
+              type: desktopHardening.HARDENING_EVENT,
+              message: hardeningReport.passed
+                ? "Desktop hardening passed all three checks (automation flag, runtime fingerprint, device identity)"
+                : `Desktop hardening incomplete: ${failedChecks.join(", ")}`,
+              desktopHardening: hardeningReport,
+            });
+          }
 
           if (normalized.deviceMode === "ios-emulation") {
             const observed = await runNavigationResilientProbe(
