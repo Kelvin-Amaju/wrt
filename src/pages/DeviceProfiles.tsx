@@ -9,6 +9,11 @@ import { androidBridge, type AndroidSetupState } from '../shared/androidBridge';
 
 type ProfileTab = 'desktop' | 'android' | 'ios-local' | 'ios-real';
 
+type FleetBridge = {
+  createAvdFleet?: (options: { count: number; baseName: string }) => Promise<{ created: string[]; names: string[] }>;
+  launchAvdFleet?: (options: { names?: string[]; count?: number; baseName?: string }) => Promise<{ devices: Array<{ serial: string }> }>;
+};
+
 const EMPTY_STATUS: MobileStatus = {
   sdkPath: null,
   adbPath: null,
@@ -26,11 +31,15 @@ const EMPTY_STATUS: MobileStatus = {
 
 const IDLE_SETUP: AndroidSetupState = { running: false, phase: 'idle', log: '', error: null };
 
+function fleetBridge(): FleetBridge {
+  return (androidBridge() || {}) as unknown as FleetBridge;
+}
+
 export function DeviceProfiles() {
   const [tab, setTab] = useState<ProfileTab>('desktop');
   const [status, setStatus] = useState<MobileStatus>(EMPTY_STATUS);
-  const [selectedAvd, setSelectedAvd] = useState('');
-  const [fleetCount, setFleetCount] = useState(3);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [createCount, setCreateCount] = useState(3);
   const [alwaysNew, setAlwaysNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -53,7 +62,6 @@ export function DeviceProfiles() {
           const mobile = await bridge!.getMobileStatus();
           if (disposed) return;
           setStatus(mobile);
-          setSelectedAvd((current) => current || mobile.avds[0] || '');
         }
         wasRunning = next.running;
       } catch (cause) {
@@ -81,6 +89,14 @@ export function DeviceProfiles() {
     [status.running],
   );
 
+  const runningByAvd = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const device of runningDevices) {
+      if (device.avdName && !map.has(device.avdName)) map.set(device.avdName, device.serial);
+    }
+    return map;
+  }, [runningDevices]);
+
   const refreshAndroid = useCallback(async () => {
     const bridge = androidBridge();
     if (!bridge?.getMobileStatus) {
@@ -93,7 +109,7 @@ export function DeviceProfiles() {
       const next = await bridge.getMobileStatus();
       setStatus(next);
       if (next.error) setError(next.error);
-      setSelectedAvd((current) => current || next.avds[0] || '');
+      setSelected((current) => new Set([...current].filter((name) => next.avds.includes(name))));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -105,15 +121,56 @@ export function DeviceProfiles() {
     if (tab === 'android') void refreshAndroid();
   }, [tab, refreshAndroid]);
 
-  async function launchSelectedAvd() {
-    const bridge = androidBridge();
-    if (!selectedAvd || !bridge?.launchAvd) return;
+  function toggleSelected(name: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setSelected(new Set(status.avds));
+  }
+
+  function clearSelection() {
+    setSelected(new Set());
+  }
+
+  async function createDevices() {
+    const bridge = fleetBridge();
+    if (!bridge.createAvdFleet) return;
+    const count = Math.max(1, Math.min(Number(createCount) || 1, status.maxParallel));
     setBusy(true);
     setError('');
-    setMessage(`Launching ${selectedAvd}…`);
+    setMessage(`Creating ${count} virtual phone(s)…`);
     try {
-      const result = await bridge.launchAvd(selectedAvd, alwaysNew ? { reuse: false } : undefined);
-      setMessage(result.alreadyRunning ? `${selectedAvd} is already ready on ${result.serial}.` : `${selectedAvd} is ready on ${result.serial}.`);
+      const result = await bridge.createAvdFleet({ count, baseName: REAL_DEVICE_FLEET_BASE });
+      setMessage(
+        result.created.length
+          ? `Created ${result.created.length} virtual phone(s): ${result.created.join(', ')}`
+          : 'All requested virtual phones already exist.',
+      );
+      await refreshAndroid();
+      if (result.created.length) setSelected(new Set(result.created));
+    } catch (cause) {
+      setMessage('');
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function launchSelected() {
+    const bridge = fleetBridge();
+    const names = [...selected];
+    if (names.length === 0 || !bridge.launchAvdFleet) return;
+    setBusy(true);
+    setError('');
+    setMessage(`Starting ${names.length} virtual phone(s)…`);
+    try {
+      const result = await bridge.launchAvdFleet({ names, baseName: REAL_DEVICE_FLEET_BASE });
+      setMessage(`${result.devices.length} virtual phone(s) ready: ${result.devices.map((device) => device.serial).join(', ')}`);
       await refreshAndroid();
     } catch (cause) {
       setMessage('');
@@ -123,16 +180,15 @@ export function DeviceProfiles() {
     }
   }
 
-  async function launchFleet() {
+  async function launchOne(name: string) {
     const bridge = androidBridge();
-    if (!bridge?.launchAvdFleet) return;
-    const count = Math.max(1, Math.min(Number(fleetCount) || 1, status.maxParallel));
+    if (!bridge?.launchAvd) return;
     setBusy(true);
     setError('');
-    setMessage(`Preparing ${count} virtual phone(s)…`);
+    setMessage(`Launching ${name}…`);
     try {
-      const result = await bridge.launchAvdFleet({ count, baseName: REAL_DEVICE_FLEET_BASE });
-      setMessage(`${result.devices.length} virtual phone(s) ready: ${result.devices.map((device) => device.serial).join(', ')}`);
+      const result = await bridge.launchAvd(name, alwaysNew ? { reuse: false } : undefined);
+      setMessage(result.alreadyRunning ? `${name} is already ready on ${result.serial}.` : `${name} is ready on ${result.serial}.`);
       await refreshAndroid();
     } catch (cause) {
       setMessage('');
@@ -150,6 +206,24 @@ export function DeviceProfiles() {
     try {
       await bridge.stopAvd(serial);
       setMessage(`${serial} stopped.`);
+      await refreshAndroid();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stopSelected() {
+    const bridge = androidBridge();
+    if (!bridge?.stopAvd) return;
+    const serials = [...selected].map((name) => runningByAvd.get(name)).filter(Boolean) as string[];
+    if (serials.length === 0) return;
+    setBusy(true);
+    setError('');
+    try {
+      for (const serial of serials) await bridge.stopAvd(serial);
+      setMessage(`Stopped ${serials.length} virtual phone(s).`);
       await refreshAndroid();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -238,66 +312,92 @@ export function DeviceProfiles() {
 
             {status.sdkPath && <div className="path-box"><span>SDK path</span><code>{status.sdkPath}</code></div>}
 
-            {!status.sdkPath ? (
+            {!status.sdkPath && (
               <div className="setup-card">
                 <strong>Android setup required</strong>
                 <p>Use the setup below to install the tools and create a virtual phone. Android Studio is not required.</p>
               </div>
-            ) : status.avds.length === 0 ? (
-              <div className="setup-card">
-                <strong>No Android virtual devices found</strong>
-                <p>Use the setup below to download the Android image, then launch a fleet to create your virtual phones.</p>
-              </div>
-            ) : (
+            )}
+
+            {status.sdkPath && (
               <>
                 <div className="avd-control-row">
                   <label className="field">
-                    <span>Installed virtual phone</span>
-                    <select aria-label="Android virtual device" value={selectedAvd} onChange={(event) => setSelectedAvd(event.target.value)}>
-                      {status.avds.map((avd) => <option key={avd} value={avd}>{avd}</option>)}
-                    </select>
-                  </label>
-                  <button className="primary-button" type="button" onClick={() => void launchSelectedAvd()} disabled={busy || setup.running || !selectedAvd}>Launch Virtual Phone</button>
-                  <label className="check-row">
-                    <input type="checkbox" checked={alwaysNew} onChange={(event) => setAlwaysNew(event.target.checked)} />
-                    <span>Always start a new instance</span>
-                  </label>
-                </div>
-
-                <div className="avd-control-row">
-                  <label className="field">
-                    <span>Parallel fleet size (max {status.maxParallel})</span>
+                    <span>Devices to create (max {status.maxParallel})</span>
                     <input
-                      aria-label="Parallel fleet size"
+                      aria-label="Devices to create"
                       type="number"
                       min={1}
                       max={status.maxParallel}
-                      value={fleetCount}
-                      onChange={(event) => setFleetCount(Number(event.target.value))}
+                      value={createCount}
+                      onChange={(event) => setCreateCount(Number(event.target.value))}
                     />
                   </label>
-                  <button className="primary-button" type="button" onClick={() => void launchFleet()} disabled={busy || setup.running}>Create &amp; Launch Fleet</button>
-                  <button className="danger-button" type="button" onClick={() => void stopAllDevices()} disabled={busy || setup.running || runningDevices.length === 0}>Stop All</button>
+                  <button className="primary-button" type="button" onClick={() => void createDevices()} disabled={busy || setup.running || !status.emulatorAvailable}>
+                    Create Devices
+                  </button>
+                  <label className="check-row">
+                    <input type="checkbox" checked={alwaysNew} onChange={(event) => setAlwaysNew(event.target.checked)} />
+                    <span>Always start a new instance on single launch</span>
+                  </label>
                 </div>
 
-                {runningDevices.length > 0 && (
-                  <table className="pod-profile-table">
-                    <thead>
-                      <tr><th>Serial</th><th>Virtual phone</th><th>State</th><th /></tr>
-                    </thead>
-                    <tbody>
-                      {runningDevices.map((device) => (
-                        <tr key={device.serial}>
-                          <td><code>{device.serial}</code></td>
-                          <td>{device.avdName || 'unknown'}</td>
-                          <td><span className="status-pill status-pill--soft">{device.state}</span></td>
-                          <td>
-                            <button className="secondary-button" type="button" onClick={() => void stopDevice(device.serial)} disabled={busy}>Stop</button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                {status.avds.length === 0 ? (
+                  <div className="setup-card">
+                    <strong>No Android virtual devices yet</strong>
+                    <p>Create a batch above. Each device is a separate AVD with its own writable disk, so cookies and history never collide. Creating does not launch anything.</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="avd-control-row">
+                      <span className="avd-selection-summary">
+                        {selected.size} selected · {status.avds.length} installed · {runningDevices.length} running
+                      </span>
+                      <button className="text-button" type="button" onClick={selectAll} disabled={busy}>Select all</button>
+                      <button className="text-button" type="button" onClick={clearSelection} disabled={busy || selected.size === 0}>Clear</button>
+                      <button className="primary-button" type="button" onClick={() => void launchSelected()} disabled={busy || setup.running || selected.size === 0}>
+                        Launch Selected ({selected.size})
+                      </button>
+                      <button className="secondary-button" type="button" onClick={() => void stopSelected()} disabled={busy || selected.size === 0}>
+                        Stop Selected
+                      </button>
+                      <button className="danger-button" type="button" onClick={() => void stopAllDevices()} disabled={busy || setup.running || runningDevices.length === 0}>Stop All</button>
+                    </div>
+
+                    <table className="pod-profile-table">
+                      <thead>
+                        <tr><th /><th>Virtual phone</th><th>Status</th><th /></tr>
+                      </thead>
+                      <tbody>
+                        {status.avds.map((avd) => {
+                          const serial = runningByAvd.get(avd);
+                          return (
+                            <tr key={avd}>
+                              <td>
+                                <input
+                                  aria-label={`Select ${avd}`}
+                                  type="checkbox"
+                                  checked={selected.has(avd)}
+                                  onChange={() => toggleSelected(avd)}
+                                />
+                              </td>
+                              <td><code>{avd}</code></td>
+                              <td>
+                                {serial
+                                  ? <span className="status-pill status-pill--soft">{serial}</span>
+                                  : <span className="status-pill status-pill--soft">Stopped</span>}
+                              </td>
+                              <td>
+                                {serial
+                                  ? <button className="secondary-button" type="button" onClick={() => void stopDevice(serial)} disabled={busy}>Stop</button>
+                                  : <button className="secondary-button" type="button" onClick={() => void launchOne(avd)} disabled={busy || setup.running}>Launch</button>}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </>
                 )}
               </>
             )}
@@ -310,7 +410,7 @@ export function DeviceProfiles() {
               <button className="primary-button" type="button" disabled={busy || setup.running || !acceptTerms} onClick={() => void setupAndroid()}>{setup.running ? 'Setting up Android...' : setup.phase === 'failed' ? 'Retry Android Setup' : 'Set up Android Emulator'}</button>
               {setup.log && <pre aria-label="Android setup progress" role="log" style={{ maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{setup.log}</pre>}
               {setup.error && <div className="run-error" role="alert">{setup.error}</div>}
-              {setup.phase === 'complete' && <p role="status">Installation complete. Check the log for any virtualization steps, then launch your virtual phone.</p>}
+              {setup.phase === 'complete' && <p role="status">Installation complete. Check the log for any virtualization steps, then create and launch your virtual phones.</p>}
             </div>
             {message && <div className="inline-message inline-message--ok">{message}</div>}
             {error && <div className="run-error" role="alert">{error}</div>}

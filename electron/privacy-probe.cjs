@@ -2,24 +2,37 @@ const net = require('node:net');
 
 const GUARD_FLAG = '__orbitqaStrictGuardBlocked';
 const BLOCKED_MARKER = '__orbitqaStrictBlocked';
-const GUARDED_PERMISSIONS = ['camera', 'microphone', 'geolocation', 'notifications'];
+const GUARD_VERSION = 5;
+const REASSERT_DELAYS_MS = [0, 16, 50, 120, 300, 700, 1500, 3000, 6000];
+const MEDIA_PROBE_TIMEOUT_MS = 700;
 
 // Runs as an init script in the main world before any site code, on every document.
+//
+// Three layers, most reliable first:
+//   1. navigator accessors become caching getters that guard the returned object on
+//      first access - works whenever the attribute appears and survives wrapper churn.
+//   2. the interface prototypes (MediaDevices, Geolocation, Permissions) are guarded
+//      so a plain instance is covered even if the accessor write is rejected.
+//   3. a bounded re-assert loop covers capabilities exposed late in the load.
 function strictPrivacyGuardSource(options) {
   const config = options && typeof options === 'object' ? options : {};
-  const spoof = config.geolocation && Number.isFinite(Number(config.geolocation.latitude))
-    && Number.isFinite(Number(config.geolocation.longitude))
-    ? {
-        latitude: Number(config.geolocation.latitude),
-        longitude: Number(config.geolocation.longitude),
-        accuracy: Number.isFinite(Number(config.geolocation.accuracy)) ? Number(config.geolocation.accuracy) : 20,
-      }
-    : null;
+  const requested = config.geolocation;
+  const spoof = requested
+    && Number.isFinite(Number(requested.latitude))
+    && Number.isFinite(Number(requested.longitude))
+      ? {
+          latitude: Number(requested.latitude),
+          longitude: Number(requested.longitude),
+          accuracy: Number.isFinite(Number(requested.accuracy)) ? Number(requested.accuracy) : 20,
+        }
+      : null;
+
+  const guardedPermissionNames = ['camera', 'microphone', 'geolocation', 'notifications'];
 
   const deniedError = () => new DOMException('Blocked by OrbitQA Strict Privacy Mode', 'NotAllowedError');
   const deniedPositionError = () => {
     const error = { code: 1, message: 'Blocked by OrbitQA Strict Privacy Mode' };
-    try { Object.defineProperty(error, 'PERMISSION_DENIED', { value: 1 }); } catch { error.PERMISSION_DENIED = 1; }
+    try { Object.defineProperty(error, 'PERMISSION_DENIED', { configurable: true, value: 1 }); } catch { error.PERMISSION_DENIED = 1; }
     return error;
   };
   const spoofedPosition = () => ({
@@ -35,13 +48,18 @@ function strictPrivacyGuardSource(options) {
     timestamp: Date.now(),
   });
 
+  // Verifies by read-back so a silently ignored assignment is not reported as applied.
   const define = (target, key, value) => {
     if (!target) return false;
     try {
       Object.defineProperty(target, key, { configurable: true, writable: true, value });
-      return true;
+      if (target[key] === value) return true;
+    } catch { /* fall through to assignment */ }
+    try {
+      target[key] = value;
+      return target[key] === value;
     } catch {
-      try { target[key] = value; return true; } catch { return false; }
+      return false;
     }
   };
 
@@ -50,62 +68,85 @@ function strictPrivacyGuardSource(options) {
     return fn;
   };
 
-  // The engine may hand back a brand new instance for navigator.geolocation on every
-  // access, so an own property written on the object captured at document-start is not
-  // guaranteed to be the object a later access returns. Writing to the shared prototype
-  // always is. Do both: the instance for stable objects, the prototype for lazy ones.
-  const defineGuarded = (object, key, fn) => {
-    if (!object) return null;
-    const guarded = markBlocked(fn);
-    define(object, key, guarded);
-    let prototype = null;
-    try { prototype = Object.getPrototypeOf(object); } catch { prototype = null; }
-    if (prototype && prototype !== object && prototype !== Object.prototype && prototype !== Function.prototype) {
-      define(prototype, key, guarded);
-    }
+  const guardedGetUserMedia = markBlocked(async () => { throw deniedError(); });
+  const guardedGetCurrentPosition = markBlocked(spoof
+    ? (success) => { if (typeof success === 'function') success(spoofedPosition()); }
+    : (_success, error) => { if (typeof error === 'function') error(deniedPositionError()); });
+  const guardedWatchPosition = markBlocked(spoof
+    ? (success) => { if (typeof success === 'function') success(spoofedPosition()); return 0; }
+    : (_success, error) => { if (typeof error === 'function') error(deniedPositionError()); return 0; });
+  const guardedRequestPermission = markBlocked(async () => 'denied');
+
+  const applied = { camera: false, microphone: false, geolocation: false, notifications: false };
+  let stabilized = false;
+  let permissionsQueryGuarded = false;
+  let guardedPermissionsQuery = null;
+
+  const publishFlag = () => {
+    try {
+      let flag = globalThis[GUARD_FLAG];
+      if (!flag || typeof flag !== 'object' || Object.isFrozen(flag)) {
+        flag = {};
+        Object.defineProperty(globalThis, GUARD_FLAG, { configurable: true, value: flag });
+      }
+      flag.camera = applied.camera;
+      flag.microphone = applied.microphone;
+      flag.geolocation = applied.geolocation;
+      flag.notifications = applied.notifications;
+      flag.spoofed = Boolean(spoof);
+      flag.version = GUARD_VERSION;
+    } catch { /* the per-function marker remains */ }
+  };
+
+  // Guards the prototype and the object. The prototype write survives wrapper churn;
+  // the own write survives a rejected prototype write.
+  const guardOnChain = (object, key, fn) => {
+    if (!object) return false;
+    let guarded = false;
+    try {
+      const prototype = Object.getPrototypeOf(object);
+      if (prototype && prototype !== object && prototype !== Object.prototype && prototype !== Function.prototype) {
+        if (define(prototype, key, fn)) guarded = true;
+      }
+    } catch { /* own write below still applies */ }
+    if (define(object, key, fn)) guarded = true;
     return guarded;
   };
 
-  const blocked = { camera: false, microphone: false, geolocation: false, notifications: false };
-
-  const media = globalThis.navigator && navigator.mediaDevices;
-  if (media && typeof media.getUserMedia === 'function') {
-    defineGuarded(media, 'getUserMedia', async () => { throw deniedError(); });
-    blocked.camera = true;
-    blocked.microphone = true;
-  }
-
-  const geo = globalThis.navigator && navigator.geolocation;
-  if (geo && typeof geo.getCurrentPosition === 'function') {
-    if (spoof) {
-      defineGuarded(geo, 'getCurrentPosition', (success) => {
-        if (typeof success === 'function') success(spoofedPosition());
-      });
-      defineGuarded(geo, 'watchPosition', (success) => {
-        if (typeof success === 'function') success(spoofedPosition());
-        return 0;
-      });
-    } else {
-      const deny = (_success, error) => { if (typeof error === 'function') error(deniedPositionError()); };
-      defineGuarded(geo, 'getCurrentPosition', deny);
-      defineGuarded(geo, 'watchPosition', (_success, error) => { deny(_success, error); return 0; });
+  const guardMediaDevices = (mediaDevices) => {
+    if (!mediaDevices) return;
+    if (guardOnChain(mediaDevices, 'getUserMedia', guardedGetUserMedia)) {
+      applied.camera = true;
+      applied.microphone = true;
+      publishFlag();
     }
-    blocked.geolocation = true;
-  }
+  };
 
-  if (typeof globalThis.Notification !== 'undefined') {
-    defineGuarded(Notification, 'requestPermission', async () => 'denied');
-    try { Object.defineProperty(Notification, 'permission', { configurable: true, get: () => 'denied' }); } catch { /* requestPermission remains blocked */ }
-    blocked.notifications = true;
-  }
+  const guardGeolocation = (geolocation) => {
+    if (!geolocation) return;
+    const position = guardOnChain(geolocation, 'getCurrentPosition', guardedGetCurrentPosition);
+    const watch = guardOnChain(geolocation, 'watchPosition', guardedWatchPosition);
+    if (position || watch) {
+      applied.geolocation = true;
+      publishFlag();
+    }
+  };
 
-  // Keep the Permissions API consistent with what getCurrentPosition actually does.
-  const permissions = globalThis.navigator && navigator.permissions;
-  if (permissions && typeof permissions.query === 'function') {
+  const guardNotification = () => {
+    if (typeof globalThis.Notification === 'undefined') return;
+    define(globalThis.Notification, 'requestPermission', guardedRequestPermission);
+    try {
+      Object.defineProperty(globalThis.Notification, 'permission', { configurable: true, get: () => 'denied' });
+    } catch { /* requestPermission remains blocked */ }
+    applied.notifications = true;
+  };
+
+  const guardPermissions = (permissions) => {
+    if (permissionsQueryGuarded || !permissions || typeof permissions.query !== 'function') return;
     const nativeQuery = permissions.query.bind(permissions);
-    defineGuarded(permissions, 'query', (descriptor) => {
+    guardedPermissionsQuery = (descriptor) => {
       const name = descriptor && descriptor.name;
-      if (!GUARDED_PERMISSIONS.includes(name)) return nativeQuery(descriptor);
+      if (guardedPermissionNames.indexOf(name) === -1) return nativeQuery(descriptor);
       const state = name === 'geolocation' && spoof ? 'granted' : 'denied';
       return Promise.resolve(nativeQuery(descriptor))
         .then((status) => {
@@ -126,16 +167,93 @@ function strictPrivacyGuardSource(options) {
           }
         })
         .catch(() => nativeQuery(descriptor));
-    });
-  }
+    };
+    const prototype = globalThis.Permissions && globalThis.Permissions.prototype;
+    if (prototype) define(prototype, 'query', guardedPermissionsQuery);
+    if (define(permissions, 'query', guardedPermissionsQuery)) permissionsQueryGuarded = true;
+  };
 
-  // Identity-independent marker: survives instance recreation and prototype swaps.
-  try {
-    Object.defineProperty(globalThis, GUARD_FLAG, {
-      configurable: true,
-      value: Object.freeze({ ...blocked, spoofed: Boolean(spoof), version: 2 }),
-    });
-  } catch { /* the per-function marker remains */ }
+  // Replaces a navigator accessor with a caching getter that guards on first access.
+  const stabilizeAccessor = (navigatorPrototype, key, onValue) => {
+    let descriptor = null;
+    try { descriptor = Object.getOwnPropertyDescriptor(navigatorPrototype, key); } catch { descriptor = null; }
+    if (!descriptor) return false;
+    const nativeGetter = descriptor.get;
+    let cached = null;
+    const getter = function () {
+      if (cached) return cached;
+      let value = null;
+      try {
+        value = nativeGetter ? nativeGetter.call(this) : (descriptor.value || null);
+      } catch {
+        value = null;
+      }
+      if (!value) return value;
+      cached = value;
+      try { onValue(value); } catch { /* keep the value even if guarding failed */ }
+      return value;
+    };
+    try {
+      Object.defineProperty(navigatorPrototype, key, { get: getter, configurable: true, enumerable: descriptor.enumerable });
+      return true;
+    } catch {
+      try {
+        Object.defineProperty(globalThis.navigator, key, { get: getter, configurable: true });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
+
+  const apply = () => {
+    const navigatorObject = globalThis.navigator;
+    let navigatorPrototype = null;
+    try { navigatorPrototype = navigatorObject ? Object.getPrototypeOf(navigatorObject) : null; } catch { navigatorPrototype = null; }
+
+    if (!stabilized && navigatorPrototype && navigatorPrototype !== Object.prototype) {
+      stabilized = true;
+      stabilizeAccessor(navigatorPrototype, 'mediaDevices', guardMediaDevices);
+      stabilizeAccessor(navigatorPrototype, 'geolocation', guardGeolocation);
+    }
+
+    const mediaPrototype = globalThis.MediaDevices && globalThis.MediaDevices.prototype;
+    if (mediaPrototype && define(mediaPrototype, 'getUserMedia', guardedGetUserMedia)) {
+      applied.camera = true;
+      applied.microphone = true;
+    }
+    const geolocationPrototype = globalThis.Geolocation && globalThis.Geolocation.prototype;
+    if (geolocationPrototype) {
+      if (define(geolocationPrototype, 'getCurrentPosition', guardedGetCurrentPosition)) applied.geolocation = true;
+      if (define(geolocationPrototype, 'watchPosition', guardedWatchPosition)) applied.geolocation = true;
+    }
+
+    if (navigatorObject) {
+      guardMediaDevices(navigatorObject.mediaDevices);
+      guardGeolocation(navigatorObject.geolocation);
+      guardPermissions(navigatorObject.permissions);
+    }
+
+    guardNotification();
+    publishFlag();
+  };
+
+  apply();
+
+  const reassert = () => { try { apply(); } catch { /* keep the previous guard */ } };
+  if (typeof setTimeout === 'function') {
+    for (const delay of REASSERT_DELAYS_MS) {
+      try { setTimeout(reassert, delay); } catch { /* no timer support */ }
+    }
+  }
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    for (const eventName of ['readystatechange', 'DOMContentLoaded', 'load']) {
+      try { document.addEventListener(eventName, reassert, true); } catch { /* no document support */ }
+    }
+  }
+  if (typeof globalThis.addEventListener === 'function') {
+    try { globalThis.addEventListener('load', reassert, true); } catch { /* no window support */ }
+  }
 }
 
 async function installStrictPrivacyGuard(context, strictMode, options) {
@@ -147,45 +265,92 @@ async function installStrictPrivacyGuard(context, strictMode, options) {
 }
 
 async function collectStrictPrivacyGuardState(page) {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
     const flag = globalThis.__orbitqaStrictGuardBlocked || null;
     const flagged = (key) => Boolean(flag && flag[key] === true);
     const isMarked = (fn) => Boolean(fn && fn.__orbitqaStrictBlocked === true);
+    const anyMarked = (...candidates) => candidates.some((candidate) => isMarked(candidate));
 
+    const navigatorObject = globalThis.navigator;
     const rtc = globalThis.RTCPeerConnection || globalThis.webkitRTCPeerConnection;
-    const media = globalThis.navigator && navigator.mediaDevices ? navigator.mediaDevices.getUserMedia : undefined;
-    const geoObject = globalThis.navigator ? navigator.geolocation : undefined;
-    const geo = geoObject ? geoObject.getCurrentPosition : undefined;
-    const notificationRequest = typeof globalThis.Notification === 'undefined' ? undefined : Notification.requestPermission;
 
-    // Behavioural probe: the guard answers synchronously, a native prompt does not.
-    // This cannot be defeated by object identity, and unlike a marker it proves the
-    // replacement is actually reachable from a fresh access.
-    let geolocationAnswersSynchronously = false;
-    if (typeof geo === 'function') {
+    // Read the instance AND the interface prototype. The instance wrapper is not
+    // guaranteed to be the object the guard wrote to, so the prototype is the
+    // authoritative reference.
+    const mediaObject = navigatorObject && navigatorObject.mediaDevices ? navigatorObject.mediaDevices : null;
+    const mediaInstance = mediaObject ? mediaObject.getUserMedia : undefined;
+    const mediaPrototype = globalThis.MediaDevices && globalThis.MediaDevices.prototype
+      ? globalThis.MediaDevices.prototype.getUserMedia
+      : undefined;
+    const mediaPresent = Boolean(mediaInstance || mediaPrototype);
+
+    const geoObject = navigatorObject ? navigatorObject.geolocation : undefined;
+    const geoInstance = geoObject ? geoObject.getCurrentPosition : undefined;
+    const geoPrototype = globalThis.Geolocation && globalThis.Geolocation.prototype
+      ? globalThis.Geolocation.prototype.getCurrentPosition
+      : undefined;
+    const geoPresent = Boolean(geoInstance || geoPrototype);
+
+    const notificationRequest = typeof globalThis.Notification === 'undefined'
+      ? undefined
+      : globalThis.Notification.requestPermission;
+
+    // Behavioural probe for media capture: the guard rejects with NotAllowedError.
+    // A native prompt stays pending and is therefore not counted as blocked.
+    const mediaBehaviourallyDenied = await new Promise((resolve) => {
+      if (!mediaObject || typeof mediaObject.getUserMedia !== 'function') return resolve(false);
+      let settled = false;
+      let timer = null;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer);
+        resolve(value);
+      };
+      if (typeof setTimeout === 'function') timer = setTimeout(() => finish(false), 700);
+      const isDenied = (error) => Boolean(error && (error.name === 'NotAllowedError' || error.code === 1));
       try {
-        geo.call(geoObject, () => { geolocationAnswersSynchronously = true; }, () => { geolocationAnswersSynchronously = true; });
+        const pending = mediaObject.getUserMedia({ video: true, audio: true });
+        if (pending && typeof pending.then === 'function') {
+          pending.then(() => finish(false), (error) => finish(isDenied(error)));
+        } else {
+          finish(false);
+        }
+      } catch (error) {
+        finish(isDenied(error));
+      }
+    });
+
+    // Same idea for geolocation: the guard answers synchronously, a native prompt does not.
+    let geolocationBehaviourallyDenied = false;
+    if (typeof geoInstance === 'function') {
+      try {
+        geoInstance.call(geoObject, () => {}, (error) => {
+          geolocationBehaviourallyDenied = Boolean(error && error.code === 1);
+        });
       } catch {
-        geolocationAnswersSynchronously = false;
+        geolocationBehaviourallyDenied = false;
       }
     }
 
-    const stateOf = (key, fn, verified) => {
-      if (!fn) return 'unsupported';
-      if (flagged(key) || isMarked(fn) || verified) return 'denied';
+    const stateOf = (present, marked, verified) => {
+      if (!present) return 'unsupported';
+      if (marked || verified) return 'denied';
       return 'prompt';
     };
 
-    const notificationState = typeof globalThis.Notification === 'undefined'
-      ? 'unsupported'
-      : stateOf('notifications', notificationRequest, false);
+    const notificationsPresent = typeof globalThis.Notification !== 'undefined';
+    const notificationsDenied = notificationsPresent
+      && (flagged('notifications') || anyMarked(notificationRequest));
 
     return {
       webrtc: !rtc ? 'unsupported' : 'available',
-      camera: stateOf('camera', media, false),
-      microphone: stateOf('microphone', media, false),
-      geolocation: stateOf('geolocation', geo, geolocationAnswersSynchronously),
-      notifications: notificationState === 'denied' ? 'denied' : (Notification.permission || 'prompt'),
+      camera: stateOf(mediaPresent, flagged('camera') || anyMarked(mediaInstance, mediaPrototype), mediaBehaviourallyDenied),
+      microphone: stateOf(mediaPresent, flagged('microphone') || anyMarked(mediaInstance, mediaPrototype), mediaBehaviourallyDenied),
+      geolocation: stateOf(geoPresent, flagged('geolocation') || anyMarked(geoInstance, geoPrototype), geolocationBehaviourallyDenied),
+      notifications: !notificationsPresent
+        ? 'unsupported'
+        : notificationsDenied ? 'denied' : (globalThis.Notification.permission || 'prompt'),
     };
   });
 }
@@ -198,7 +363,11 @@ async function assertStrictPrivacyGuard(page, strictMode) {
     if (!['denied', 'unsupported'].includes(state[key])) failures.push(key);
   }
   if (failures.length > 0) {
-    throw new Error(`Strict Privacy Mode could not block: ${failures.join(', ')}`);
+    const version = await page.evaluate(() => globalThis.__orbitqaStrictGuardBlocked?.version ?? null).catch(() => null);
+    throw new Error(
+      `Strict Privacy Mode could not block: ${failures.join(', ')} ` +
+      `(guard v${version ?? 'MISSING'}, state ${JSON.stringify(state)})`,
+    );
   }
 }
 

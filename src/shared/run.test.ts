@@ -133,9 +133,49 @@ it('accepts strict privacy defaults and rejects invalid proxy settings', () => {
         password: '',
         requireVerifiedRoute: true,
         routeCheckUrl: 'https://api64.ipify.org?format=json',
+        recaptchaAudio: false,
+        sttApiKey: '',
       },
     },
   })).toEqual({ ok: false, error: 'Proxy server must use http://, https://, or socks5://' });
+});
+
+it('requires a transcription key when audio challenge solving is enabled', () => {
+  const base = validRequest();
+
+  expect(validateQaRunRequest({
+    ...base,
+    privacy: {
+      strictMode: true,
+      proxy: {
+        enabled: false,
+        server: '',
+        username: '',
+        password: '',
+        requireVerifiedRoute: false,
+        routeCheckUrl: 'https://api64.ipify.org?format=json',
+        recaptchaAudio: true,
+        sttApiKey: '   ',
+      },
+    },
+  })).toEqual({ ok: false, error: 'Audio challenge solving needs a speech-to-text API key' });
+
+  expect(validateQaRunRequest({
+    ...base,
+    privacy: {
+      strictMode: true,
+      proxy: {
+        enabled: false,
+        server: '',
+        username: '',
+        password: '',
+        requireVerifiedRoute: false,
+        routeCheckUrl: 'https://api64.ipify.org?format=json',
+        recaptchaAudio: true,
+        sttApiKey: 'sk-test',
+      },
+    },
+  })).toEqual({ ok: true });
 });
 
 it('accepts rotating/static pools on desktop without renderer proxy secrets', () => {

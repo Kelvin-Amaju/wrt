@@ -76,6 +76,9 @@ export interface ProxyRunSettings {
   password: string;
   requireVerifiedRoute: boolean;
   routeCheckUrl: string;
+  // Human-verification handling for this route.
+  recaptchaAudio: boolean;
+  sttApiKey: string;
 }
 
 export interface PrivacyRunSettings {
@@ -93,6 +96,8 @@ export function createDefaultPrivacySettings(): PrivacyRunSettings {
       password: '',
       requireVerifiedRoute: false,
       routeCheckUrl: DEFAULT_ROUTE_CHECK_URL,
+      recaptchaAudio: false,
+      sttApiKey: '',
     },
   };
 }
@@ -110,6 +115,15 @@ export function validatePrivacySettings(
   if (routeUrl.protocol !== 'https:') {
     return { ok: false, error: 'Proxy route-check URL must use https://' };
   }
+
+  // Audio challenge solving needs a transcription key, and it applies whether or
+  // not a proxy is configured, so it is checked before the proxy early return.
+  const recaptchaAudio = Boolean(settings.proxy.recaptchaAudio);
+  const sttApiKey = String(settings.proxy.sttApiKey || '').trim();
+  if (recaptchaAudio && !sttApiKey) {
+    return { ok: false, error: 'Audio challenge solving needs a speech-to-text API key' };
+  }
+
   if (!settings.proxy.enabled) return { ok: true };
   if (deviceMode === 'android') {
     return { ok: false, error: 'Custom proxy privacy gating is not available for Android AVD runs in v0.5' };

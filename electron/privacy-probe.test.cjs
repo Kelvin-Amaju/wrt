@@ -102,7 +102,11 @@ test('reads the installed strict privacy guard state from the page', async () =>
   vm.runInContext(`(${scripts[0].toString()})()`, sandbox);
 
   const page = {
-    evaluate: async (fn) => JSON.parse(JSON.stringify(vm.runInContext(`(${fn.toString()})()`, sandbox))),
+    evaluate: async (fn) => {
+      const result = vm.runInContext(`(${fn.toString()})()`, sandbox);
+      const value = result && typeof result.then === 'function' ? await result : result;
+      return JSON.parse(JSON.stringify(value));
+    },
   };
   const state = await collectStrictPrivacyGuardState(page);
   assert.deepEqual(state, {
@@ -207,7 +211,6 @@ test('strict privacy blocks WebRTC exposure when policy is exposed', () => {
 });
 
 
-
 test('strict privacy accepts verified WebRTC no-leak state without hiding the API', () => {
   const report = buildPrivacyReport({
     expected: { userAgentIncludes: '', viewport: { width: 1280, height: 720 }, dpr: 1, locale: 'en-US', timezoneId: 'UTC' },
@@ -251,8 +254,7 @@ test('compatibility emulation reports navigator platform as host/runtime informa
       literalIpCandidates: [],
       permissionStates: { camera: 'denied', microphone: 'denied', geolocation: 'denied', notifications: 'denied' },
     },
-    proxyChecks: [],
-    strictMode: true,
+    proxyChecks: [], strictMode: true,
     permissionPolicy: { camera: 'not-granted', microphone: 'not-granted', geolocation: 'not-granted', notifications: 'not-granted' },
     startedAt: Date.now(),
   });
@@ -272,8 +274,7 @@ test('known platform mismatch remains a warning and does not block', () => {
       locale: 'en-US', timezoneId: 'UTC', webRtcSupported: true, webRtcBlocked: true, literalIpCandidates: [],
       permissionStates: { camera: 'denied', microphone: 'denied', geolocation: 'denied', notifications: 'denied' },
     },
-    proxyChecks: [],
-    strictMode: true,
+    proxyChecks: [], strictMode: true,
     permissionPolicy: { camera: 'not-granted', microphone: 'not-granted', geolocation: 'not-granted', notifications: 'not-granted' },
     startedAt: Date.now(),
   });
@@ -291,8 +292,7 @@ test('marks WebRTC unavailable as not applicable instead of pass', () => {
       locale: 'en-US', timezoneId: 'UTC', webRtcSupported: false, literalIpCandidates: [],
       permissionStates: { camera: 'denied', microphone: 'denied', geolocation: 'denied', notifications: 'denied' },
     },
-    proxyChecks: [],
-    strictMode: true,
+    proxyChecks: [], strictMode: true,
     permissionPolicy: { camera: 'not-granted', microphone: 'not-granted', geolocation: 'not-granted', notifications: 'not-granted' },
     startedAt: Date.now(),
   });
@@ -313,8 +313,7 @@ test('strict privacy treats prompt permissions as blocking instead of pass', () 
       locale: 'en-US', timezoneId: 'UTC', webRtcSupported: false, literalIpCandidates: [],
       permissionStates: { camera: 'prompt', microphone: 'prompt', geolocation: 'prompt', notifications: 'prompt' },
     },
-    proxyChecks: [],
-    strictMode: true,
+    proxyChecks: [], strictMode: true,
     permissionPolicy: { camera: 'denied', microphone: 'denied', geolocation: 'denied', notifications: 'denied' },
     startedAt: Date.now(),
   });
@@ -334,8 +333,7 @@ test('strict privacy blocks a granted notification permission', () => {
       locale: 'en-US', timezoneId: 'UTC', webRtcSupported: true, literalIpCandidates: [],
       permissionStates: { camera: 'denied', microphone: 'denied', geolocation: 'denied', notifications: 'granted' },
     },
-    proxyChecks: [],
-    strictMode: true,
+    proxyChecks: [], strictMode: true,
     permissionPolicy: { camera: 'not-granted', microphone: 'not-granted', geolocation: 'not-granted', notifications: 'not-granted' },
     startedAt: Date.now(),
   });
@@ -440,4 +438,88 @@ test('WebRTC policy is indeterminate when ICE verification fails', async () => {
   });
   assert.equal(report.webRtcPolicy, 'indeterminate');
   assert.equal(report.blocked, true);
+});
+
+
+// --- regressions for the failure modes that blocked real work units ---
+
+test('strict guard survives a browser that resolves navigator.geolocation to a new instance', async () => {
+  const scripts = [];
+  const context = { addInitScript: async (script) => scripts.push(script) };
+  await installStrictPrivacyGuard(context, true);
+
+  const geoPrototype = { getCurrentPosition() { throw new Error('native'); }, watchPosition() { return 1; } };
+  const navigatorObject = { mediaDevices: { getUserMedia: async () => 'allowed' } };
+  Object.defineProperty(navigatorObject, 'geolocation', {
+    configurable: true,
+    get: () => Object.create(geoPrototype),
+  });
+
+  const sandbox = { DOMException, navigator: navigatorObject };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(`(${scripts[0].toString()})()`, sandbox);
+
+  const firstAccess = sandbox.navigator.geolocation;
+  const secondAccess = sandbox.navigator.geolocation;
+  assert.notEqual(firstAccess, secondAccess);
+  assert.equal(secondAccess.getCurrentPosition.__orbitqaStrictBlocked, true);
+
+  await new Promise((resolve, reject) => {
+    secondAccess.getCurrentPosition(
+      () => reject(new Error('geolocation unexpectedly succeeded')),
+      (error) => {
+        try { assert.equal(error.code, 1); resolve(); } catch (assertionError) { reject(assertionError); }
+      },
+    );
+  });
+});
+
+test('strict guard covers navigator.mediaDevices when the API only appears after document-start', async () => {
+  const scripts = [];
+  const context = { addInitScript: async (script) => scripts.push(script) };
+  await installStrictPrivacyGuard(context, true);
+
+  function MediaDevices() {}
+  MediaDevices.prototype.getUserMedia = async () => 'native';
+
+  const navigatorObject = {};
+  const sandbox = { DOMException, MediaDevices, navigator: navigatorObject };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(`(${scripts[0].toString()})()`, sandbox);
+
+  assert.equal(navigatorObject.mediaDevices, undefined);
+  navigatorObject.mediaDevices = Object.create(MediaDevices.prototype);
+
+  assert.equal(navigatorObject.mediaDevices.getUserMedia.__orbitqaStrictBlocked, true);
+  await assert.rejects(
+    () => navigatorObject.mediaDevices.getUserMedia({ video: true }),
+    (error) => error?.name === 'NotAllowedError',
+  );
+});
+
+test('media capture is verified behaviourally when no guard marker is reachable', async () => {
+  const sandbox = {
+    DOMException,
+    navigator: {
+      mediaDevices: {
+        getUserMedia: async () => { throw new DOMException('blocked', 'NotAllowedError'); },
+      },
+    },
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+
+  const page = {
+    evaluate: async (fn) => {
+      const result = vm.runInContext(`(${fn.toString()})()`, sandbox);
+      const value = result && typeof result.then === 'function' ? await result : result;
+      return JSON.parse(JSON.stringify(value));
+    },
+  };
+
+  const state = await collectStrictPrivacyGuardState(page);
+  assert.equal(state.camera, 'denied');
+  assert.equal(state.microphone, 'denied');
 });

@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('orbitqa', {
   listAvds: () => ipcRenderer.invoke('mobile:listAvds'),
   launchAvd: (name, options) => ipcRenderer.invoke('mobile:launchAvdEx', name, options),
   stopAvd: (serial) => ipcRenderer.invoke('mobile:stopAvd', serial),
+  createAvdFleet: (options) => ipcRenderer.invoke('mobile:createAvdFleet', options),
   launchAvdFleet: (options) => ipcRenderer.invoke('mobile:launchFleet', options),
   stopAllAvds: () => ipcRenderer.invoke('mobile:stopAllAvds'),
   listRunningAvds: () => ipcRenderer.invoke('mobile:listRunningAvds'),
