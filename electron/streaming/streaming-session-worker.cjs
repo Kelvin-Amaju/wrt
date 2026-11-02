@@ -1,5 +1,6 @@
 const {captureAuthorizedSession}=require('./authorized-session.cjs');
 const {createPersistentTrackDeck,nextTrack,chooseObservationSeconds,trackForCurrentUrl,canonicalTrackUrlKey}=require('./playback-planner.cjs');
+const {classifyVisitFailure,createVisitBudget,skipReasonForLog}=require('./streaming-resilience.cjs');
 function chooseRotatingObservationSeconds({minSeconds=60,maxSeconds=110,rng=Math.random}={}){
   // Every song receives a fresh independent random draw. Repeats remain possible by chance.
   return chooseObservationSeconds({minSeconds,maxSeconds,rng});
@@ -66,6 +67,47 @@ async function reloadTransientStreamingPage({page,signal,log,workId,stage='brows
     return false;
   }
 }
+
+/*
+ * Generic advertisement probe.
+ *
+ * Only some platform adapters expose advertisementActive(). Without a fallback an
+ * ad break reads as a playback stall, burns the three recovery attempts and
+ * invalidates an otherwise valid play. This probe is only consulted where the
+ * session already looks wrong (identity mismatch or stopped playback), so a
+ * lingering false positive costs grace rather than credit, and the observation
+ * deadline still bounds it.
+ */
+const GENERIC_AD_SELECTORS=[
+  '[data-testid="ad-banner"]',
+  '[data-testid*="advertisement" i]',
+  '[data-testid*="ad-slot" i]',
+  '[aria-label*="advertisement" i]',
+  '[class*="advertisement" i]',
+  '[class*="ad-banner" i]',
+  '#ad-banner',
+  '.ad-banner',
+];
+async function genericAdvertisementVisible(page){
+  if(!page?.evaluate)return false;
+  try{
+    return Boolean(await page.evaluate((selectors)=>{
+      const visible=(element)=>{
+        if(!element)return false;
+        const style=getComputedStyle(element);
+        const rect=element.getBoundingClientRect();
+        return style.display!=='none'&&style.visibility!=='hidden'&&Number(style.opacity||1)>0.05&&rect.width>24&&rect.height>8;
+      };
+      for(const selector of selectors){
+        for(const element of document.querySelectorAll(selector)){
+          if(visible(element))return true;
+        }
+      }
+      return false;
+    },GENERIC_AD_SELECTORS));
+  }catch{return false;}
+}
+
 function savedSessionAccount(account={}){return {...account,authMode:'session',username:'',password:''};}
 function missingSessionReason(){return 'No active saved login session is available. Open Accounts, use LOGIN MANUALLY, finish sign-in in normal Chrome/Edge, then MARK VERIFIED before starting Streaming QA.';}
 function authRequiredError(reason){
@@ -618,7 +660,26 @@ async function observeVerifiedPlayback({page,controls,track,adapter,signal,sleep
   let recoveryAttempts=0;
   const pollMs=200; // DOM/Playwright probes are asynchronous; avoid overlapping timers.
   const adActive=async()=>{
-    try{return Boolean(await adapter?.advertisementActive?.({page,track,signal}));}catch{return false;}
+    try{
+      if(typeof adapter?.advertisementActive==='function')return Boolean(await adapter.advertisementActive({page,track,signal}));
+    }catch{/* fall through to the generic probe */}
+    return genericAdvertisementVisible(page);
+  };
+  // Hoisted so the 250ms identity cache survives across poll ticks.
+  const matchCache={ts:0,trackKey:'',id:'',value:null};
+  const matchAssignedTrack=async()=>{
+    const cached=activeTrackMatchesCached(page,String(track?.id||''),track,matchCache);
+    if(cached!==null)return cached;
+    let value=false;
+    try{
+      if(typeof adapter?.activeTrackMatches==='function')value=Boolean(await boundedBrowserProbe('Selected track identity',()=>adapter.activeTrackMatches({page,track,signal}),{signal}));
+      else if(typeof adapter?.selectedTrackReady==='function')value=Boolean(await boundedBrowserProbe('Selected track readiness',()=>adapter.selectedTrackReady({page,track,signal}),{signal}));
+    }catch(error){if(error?.code==='ORBITQA_STREAMING_PROBE_STALLED')throw error;}
+    matchCache.ts=Date.now();
+    matchCache.trackKey=String(track?.id||track?.url||'');
+    matchCache.id=String(track?.id||'');
+    matchCache.value=value;
+    return value;
   };
   while(Date.now()<observationDeadline){
     throwIfAborted(signal);
@@ -627,13 +688,6 @@ async function observeVerifiedPlayback({page,controls,track,adapter,signal,sleep
     // Strict selected-media guard. The observation may never continue on an unassigned song.
     // Prefer the adapter's active-player identity check because a service page URL may stay
     // unchanged after autoplay/queue advances to a different song.
-    const matchAssignedTrack=async()=>{
-      try{
-        if(typeof adapter?.activeTrackMatches==='function')return Boolean(await boundedBrowserProbe('Selected track identity',()=>adapter.activeTrackMatches({page,track,signal}),{signal}));
-        if(typeof adapter?.selectedTrackReady==='function')return Boolean(await boundedBrowserProbe('Selected track readiness',()=>adapter.selectedTrackReady({page,track,signal}),{signal}));
-      }catch(error){if(error?.code==='ORBITQA_STREAMING_PROBE_STALLED')throw error;}
-      return false;
-    };
     if(typeof adapter?.activeTrackMatches==='function'||typeof adapter?.selectedTrackReady==='function'){
       const selected=await matchAssignedTrack();
       if(!selected){
@@ -780,6 +834,7 @@ async function runPersistentAccountStreamingSession({
   const visitedKeys=new Set();
   const visitLimit=Math.max(1,Math.min(Number.isFinite(Number(maxTrackVisits))?Math.floor(Number(maxTrackVisits)):tracks.length,tracks.length));
   const pauseVisit=requestedChecks.includes('pause-resume')?randomPauseVisit({runId,accountId:account?.id||workUnit?.accountId,visitLimit}):0;
+  const budget=createVisitBudget({visitLimit,maxConsecutiveFailures:5});
   let session=null;
   let detachPageDiagnostics=()=>{};
   let pendingTransientPlayerIssue=null;
@@ -867,8 +922,10 @@ async function runPersistentAccountStreamingSession({
     const sessionIntelligence=normalizeContentIntelligence(workUnit?.contentIntelligence||{});
     if(sessionIntelligence.enabled)await streamingIntelligenceWarmup({page,platform:account?.platform,intelligence:sessionIntelligence,signal,sleep,log,workId:workUnit?.workId});
 
-    while(visits<visitLimit){
+    while(budget.canContinue(visits)){
       throwIfAborted(signal);
+      budget.beginVisit();
+      try{
       if(pageClosed(page)){terminalReason='browser-closed';return {runId,workId:workUnit?.workId,accountId:account?.id,trackVisits:visits,reason:terminalReason,screenshots,checkTotals};}
       if(!currentTrack||visitedKeys.has(keyOf(currentTrack))){currentTrack=nextUnvisited();currentAlreadyLocated=false;}
       if(!currentTrack)break;
@@ -934,7 +991,7 @@ async function runPersistentAccountStreamingSession({
       const observed=await observeVerifiedPlayback({page,controls,track:currentTrack,adapter,signal,sleep,targetSeconds:observationSeconds,pausePlan,log,workId:workUnit?.workId,intelligencePlan});
       if(observed.status==='browser-closed'){terminalReason='browser-closed';return {runId,workId:workUnit?.workId,accountId:account?.id,trackVisits:visits,reason:terminalReason,screenshots,checkTotals};}
       if(shouldPause)recordCheck('pause-resume',observed.pauseResult||{status:'NOT_APPLICABLE',reason:'Random pause was selected but could not be executed'},currentTrack);
-      visits++;visitedKeys.add(keyOf(currentTrack));
+      visits++;visitedKeys.add(keyOf(currentTrack));budget.recordSuccess();
       const validPlayback=observed.status==='PASS';
       safeLog(log,`${validPlayback?'Valid QA playback':'QA playback not valid'}: ${currentTrack?.title||currentTrack?.id} · ${Math.round((observed.activePlaybackMs||0)/1000)}s / ${observationSeconds}s active`,{workId:workUnit?.workId,type:validPlayback?'valid-playback':'invalid-playback',severity:validPlayback?'success':'warning',stage:'observation',action:validPlayback?'valid-playback':'invalid-playback',trackId:currentTrack?.id,trackTitle:currentTrack?.title,activePlaybackMs:observed.activePlaybackMs,targetPlaybackMs:observed.targetPlaybackMs,reason:observed.reason,currentUrl:safePageUrl(page)});
       const intelligenceActions=intelligence.enabled&&intelligence.decisionMode==='manual';
@@ -993,6 +1050,21 @@ async function runPersistentAccountStreamingSession({
         if(requestedChecks.includes('queue-transition'))recordCheck('queue-transition',transition,currentTrack);
       }
       currentTrack=planned;currentAlreadyLocated=false;
+      }catch(error){
+        if(error?.name==='AbortError')throw error;
+        const verdict=classifyVisitFailure(error);
+        if(verdict!=='skip')throw error;
+        releaseLease();
+        const outcome=budget.recordSkip(error?.message);
+        safeLog(log,skipReasonForLog(error,outcome.consecutiveFailures,5),{workId:workUnit?.workId,type:'visit-skip',severity:'warning',stage:'selection',action:'skip-selected-song',trackId:currentTrack?.id,trackTitle:currentTrack?.title,reason:outcome.reason,consecutiveSkips:outcome.consecutiveFailures,currentUrl:safePageUrl(page)});
+        if(currentTrack)visitedKeys.add(keyOf(currentTrack));
+        currentTrack=null;
+        currentAlreadyLocated=false;
+        if(outcome.exhausted){
+          throw retryableSessionError(`${outcome.consecutiveFailures} consecutive selected songs could not be played. Last reason: ${outcome.reason}`);
+        }
+        continue;
+      }
     }
     terminalReason='visit-limit';
     return {runId,workId:workUnit?.workId,accountId:account?.id,trackVisits:visits,reason:terminalReason,screenshots,checkTotals};
@@ -1019,4 +1091,4 @@ async function runPersistentAccountStreamingSession({
   }
 }
 
-module.exports={runStreamingSession,runPersistentAccountStreamingSession,waitForPlaybackStart,waitObservationWindow,observeVerifiedPlayback,randomPauseVisit,randomPauseOffsetMs,transientStreamingPage,reloadTransientStreamingPage,throwIfAborted,chooseRotatingObservationSeconds,_test:{waitForAuthorizedAccount,requiresManualChallenge,hasStoredCredentials,waitForSelectedTrackLocation}};
+module.exports={runStreamingSession,runPersistentAccountStreamingSession,waitForPlaybackStart,waitObservationWindow,observeVerifiedPlayback,randomPauseVisit,randomPauseOffsetMs,transientStreamingPage,reloadTransientStreamingPage,throwIfAborted,chooseRotatingObservationSeconds,genericAdvertisementVisible,_test:{waitForAuthorizedAccount,requiresManualChallenge,hasStoredCredentials,waitForSelectedTrackLocation}};

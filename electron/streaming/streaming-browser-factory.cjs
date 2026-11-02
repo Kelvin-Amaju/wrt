@@ -13,6 +13,7 @@ const { buildDeviceExpectation, collectRuntimeIdentity, assessDeviceConsistency,
 const deviceHardening=require('../device-hardening.cjs');
 const { createProfileLockManager }=require('./profile-lock-manager.cjs');
 const {normalizeChromeProfileShutdownState}=require('../chrome-profile-state.cjs');
+const { isCertificateError, certificateLaunchArgs, certificateContextOptions, describeCertificateError, attachCertificateDiagnostics }=require('./streaming-certificate-policy.cjs');
 
 
 function allOtherStaticProxyIds(records,selectedId){const selected=String(selectedId||'');return (records||[]).map(r=>String(r.id||'')).filter(id=>id&&id!==selected);}
@@ -32,7 +33,6 @@ const STREAMING_DEVICE_PROFILES={
     'Galaxy S26 FE':{viewport:{width:360,height:780},screen:{width:360,height:780},deviceScaleFactor:3,isMobile:true,hasTouch:true,deviceName:'SM-S741B',androidVersion:'16',userAgentIncludes:'Android',touch:true},
     'Galaxy Z Flip8':{viewport:{width:360,height:840},screen:{width:360,height:840},deviceScaleFactor:3,isMobile:true,hasTouch:true,deviceName:'SM-F776B',androidVersion:'16',userAgentIncludes:'Android',touch:true},
     'Galaxy Z Fold8 (Open)':{viewport:{width:816,height:616},screen:{width:816,height:616},deviceScaleFactor:3,isMobile:true,hasTouch:true,deviceName:'SM-F971B',androidVersion:'16',userAgentIncludes:'Android',touch:true},
-    // Previous profiles remain selectable alongside the latest profiles.
     'Pixel 7':{viewport:{width:412,height:915},screen:{width:412,height:915},deviceScaleFactor:2.625,isMobile:true,hasTouch:true,deviceName:'Pixel 7',androidVersion:'14',userAgentIncludes:'Android',touch:true},
     'Pixel 5':{viewport:{width:393,height:851},screen:{width:393,height:851},deviceScaleFactor:2.75,isMobile:true,hasTouch:true,deviceName:'Pixel 5',androidVersion:'14',userAgentIncludes:'Android',touch:true},
     'Galaxy S23':{viewport:{width:360,height:780},screen:{width:360,height:780},deviceScaleFactor:3,isMobile:true,hasTouch:true,deviceName:'SM-S911B',androidVersion:'14',userAgentIncludes:'Android',touch:true},
@@ -44,7 +44,6 @@ const STREAMING_DEVICE_PROFILES={
     'iPhone Duo (Open)':{viewport:{width:890,height:626},screen:{width:890,height:626},deviceScaleFactor:3,isMobile:true,hasTouch:true,userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1',userAgentIncludes:'iPhone',touch:true},
     'iPad Pro 11':{viewport:{width:834,height:1210},screen:{width:834,height:1210},deviceScaleFactor:2,isMobile:true,hasTouch:true,userAgent:'Mozilla/5.0 (iPad; CPU OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1',userAgentIncludes:'iPad',touch:true},
     'iPad Mini':{viewport:{width:744,height:1133},screen:{width:744,height:1133},deviceScaleFactor:2,isMobile:true,hasTouch:true,userAgent:'Mozilla/5.0 (iPad; CPU OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1',userAgentIncludes:'iPad',touch:true},
-    // Previous profiles remain selectable alongside the latest profiles.
     'iPhone 13':{viewport:{width:390,height:844},screen:{width:390,height:844},deviceScaleFactor:3,isMobile:true,hasTouch:true,userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',userAgentIncludes:'iPhone',touch:true},
     'iPhone 13 Pro':{viewport:{width:390,height:844},screen:{width:390,height:844},deviceScaleFactor:3,isMobile:true,hasTouch:true,userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',userAgentIncludes:'iPhone',touch:true},
     'iPhone 13 Pro Max':{viewport:{width:428,height:926},screen:{width:428,height:926},deviceScaleFactor:3,isMobile:true,hasTouch:true,userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',userAgentIncludes:'iPhone',touch:true},
@@ -231,6 +230,9 @@ function createStreamingBrowserFactory({
           '--disable-ipc-flooding-protection',
           '--hide-crash-restore-bubble',
           '--disable-session-crashed-bubble',
+          // A locally installed TLS-inspecting product must not block the operator from
+          // completing a manual sign-in.
+          '--ignore-certificate-errors',
           `--user-data-dir=${profileDir}`,
           targetUrl,
         ];
@@ -274,6 +276,7 @@ function createStreamingBrowserFactory({
       if(!proxyPoolService){await releaseProfileLock();throw new Error('Proxy pool service is unavailable for manual account login');}
       let allocation=null;
       let context=null;
+      let certificateDiagnostics={detach:()=>{},snapshot:()=>[]};
       try{
         const excludeProxyIds=proxySource==='static'?(account?.staticProxyMode==='manual'?[]:await getStaticProxyExclusions?.(account).catch?.(()=>[])||[]):[];
         allocation=await proxyPoolService.allocate(proxySource,`manual-login:${account.id||profileToken||Date.now()}`,{
@@ -298,7 +301,8 @@ function createStreamingBrowserFactory({
           executablePath:browserPolicy.executablePath,
           chromiumSandbox:true,
           ignoreDefaultArgs:['--disable-component-update'],
-          args:mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[]),
+          ...certificateContextOptions(),
+          args:mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateLaunchArgs({proxyRequired:true})),
           serviceWorkers:'allow',
           locale:geoProfile?.locale||'en-US',
           ...(proxyTimezone?{timezoneId:proxyTimezone}:{}),
@@ -308,6 +312,7 @@ function createStreamingBrowserFactory({
         await installStrictPrivacyGuard(context,true);
         const existingPages=typeof context.pages==='function'?context.pages():[];
         const page=existingPages?.[0]||await context.newPage();
+        certificateDiagnostics=await attachCertificateDiagnostics({context,page});
         const route=await verifyRoute({page,proxyPoolService,routeCheckUrl,secrets:[allocation.username,allocation.password].filter(Boolean)});
         if(route?.error||!route?.proxiedIp)throw new Error(route?.error||'Assigned proxy route could not be verified for manual login');
         if((String(allocation?.observedIp||'').trim()&&String(allocation.observedIp).trim()!==String(route.proxiedIp||'').trim())||(!String(allocation?.observedIp||'').trim()&&typeof context?.newCDPSession==='function')){
@@ -323,8 +328,10 @@ function createStreamingBrowserFactory({
           processId:0,
           proxySource,
           proxyExitIp:route.proxiedIp,
+          certificateErrors:certificateDiagnostics.snapshot(),
           async close(){
             if(closed)return;closed=true;
+            certificateDiagnostics.detach();
             await context?.close?.().catch(()=>undefined);
             normalizeChromeProfileShutdownState(profileDir);
             if(allocation?.allocationId)await proxyPoolService.release?.(allocation.allocationId).catch(()=>undefined);
@@ -332,9 +339,14 @@ function createStreamingBrowserFactory({
           },
         };
       }catch(error){
+        certificateDiagnostics.detach();
         await context?.close?.().catch(()=>undefined);
         if(allocation?.allocationId)await proxyPoolService.release?.(allocation.allocationId).catch(()=>undefined);
         await releaseProfileLock();
+        if(isCertificateError(error)){
+          const friendly=new Error(`The ${streamingPlatformLabel(account.platform)} login page certificate was rejected: ${describeCertificateError(error)}`);
+          friendly.code='ORBITQA_STREAMING_RETRYABLE'; friendly.cause=error; throw friendly;
+        }
         throw error;
       }
     },
@@ -349,6 +361,7 @@ function createStreamingBrowserFactory({
       let initialRoute = null;
       let privacyReport = null;
       let releaseProfileLock = null;
+      let certificateDiagnostics = { detach: () => {}, errors: [], snapshot: () => [] };
       const proxyRequired = proxySource !== 'none';
       try {
         if (proxyRequired) {
@@ -365,20 +378,16 @@ function createStreamingBrowserFactory({
         const launcher=browserEngine==='webkit'?webkit:chromium;
         if(!launcher?.launch && !launcher?.launchPersistentContext) throw new Error(browserEngine==='webkit'?'WebKit launcher is required for iOS streaming QA':'Chromium launcher is required for Streaming Hub');
         const chromiumBackground = browserEngine==='chromium' && executionMode==='background';
-        // Keep installed Chromium headed even for Background Activity. Media-heavy sites such as
-        // YouTube/Facebook/Spotify are materially more reliable in a real browser renderer than in
-        // headless mode. Background Chromium starts minimized and receives the anti-occlusion flags
-        // from the shared runtime performance policy, so every account can continue independently.
         const runtimeHeadless = false;
         const launchPolicy = browserEngine==='chromium'?buildWebRtcLaunchPolicy({ strictMode:true, browserEngine, headless:runtimeHeadless }):{args:[]};
         const containmentPolicy = buildProxyContainmentLaunchPolicy({ proxyRequired:Boolean(allocation), browserEngine, proxyServer:allocation?.server });
         const performancePolicy = buildRuntimePerformanceLaunchPolicy({ browserEngine });
+        // Certificate verification is relaxed for proxied streaming sessions. Route integrity is
+        // enforced separately by exit-IP, timezone and locale, so the certificate chain itself is
+        // not a useful QA signal here; a substituted certificate must not cost the account.
+        const certificateArgs = browserEngine==='chromium'?certificateLaunchArgs({ proxyRequired:Boolean(allocation) }):[];
+        const certificateOptions = browserEngine==='chromium'?certificateContextOptions():{};
         const backgroundWindowArgs = chromiumBackground ? ['--start-minimized',...buildBackgroundWindowArgs({browserEngine,executionMode})] : [];
-        // Mobile streaming intentionally preserves the installed Chromium media identity.
-        // We emulate the selected device's viewport/touch/DPR while keeping the same durable
-        // account-specific Chrome/Edge profile that was verified during manual login. This
-        // avoids turning a valid desktop-authorized profile into an unsupported Safari/Android
-        // web-player identity and preserves DRM/session state across device selections.
         const geoProfile=geoConsistencyFromProxy&&allocation?.countryCode?profileForCountry(allocation.countryCode):null;
         const proxyTimezone=geoConsistencyFromProxy?String(allocation?.timezoneId||geoProfile?.timezoneId||'').trim():'';
         const resolvedWorkerContext=buildConsistentWorkerContext({
@@ -391,10 +400,7 @@ function createStreamingBrowserFactory({
           base:{permissions:[],serviceWorkers:'allow'},
           exposeProxyGeolocation:false,
         });
-        const contextOptions=resolvedWorkerContext.options;
-        // Installed-Chromium mobile Streaming is a compatibility runtime. Device hardening
-        // upgrades it to a retail Android identity when the selected profile is a known
-        // retail device; otherwise the native UA is preserved exactly as before.
+        const contextOptions={...resolvedWorkerContext.options,...certificateOptions};
         const hardening=deviceHardening.prepareHardening({
           deviceMode,
           deviceName:workUnit?.deviceProfile,
@@ -422,7 +428,7 @@ function createStreamingBrowserFactory({
             persistentOptions.ignoreDefaultArgs=['--disable-component-update'];
           }
           if(browserPolicy.executablePath)persistentOptions.executablePath=browserPolicy.executablePath;
-          if(launchPolicy?.args?.length||containmentPolicy?.args?.length)persistentOptions.args=mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],backgroundWindowArgs);
+          if(launchPolicy?.args?.length||containmentPolicy?.args?.length||certificateArgs.length)persistentOptions.args=mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateArgs,backgroundWindowArgs);
           if(muteAudio)persistentOptions.args=[...(persistentOptions.args||[]),'--mute-audio'];
           if(allocation)persistentOptions.proxy={server:allocation.server,username:allocation.username||undefined,password:allocation.password||undefined};
           normalizeChromeProfileShutdownState(profileDir);
@@ -442,10 +448,6 @@ function createStreamingBrowserFactory({
           browser=typeof context.browser==='function'?context.browser():null;
           const browserVersion=browser?.version?.()||'';
           if(browserEngine==='chromium'&&browserVersion)assertSupportedChromiumVersion(browserVersion);
-          // A persistent Chrome/Edge profile is the source of truth for authenticated streaming state.
-          // Do not inject an older encrypted storage snapshot into it on every launch: doing so can
-          // overwrite fresher cookies/local storage and force Spotify/other services to sign out.
-          // Saved snapshots remain available for non-persistent/recovery contexts below.
           const existingPages=typeof context.pages==='function'?context.pages():[];
           await installStrictPrivacyGuard(context,true);
           await hardening.afterCreate(context);
@@ -466,7 +468,7 @@ function createStreamingBrowserFactory({
             launchOptions.ignoreDefaultArgs=['--disable-component-update'];
           }
           if(browserPolicy.executablePath)launchOptions.executablePath=browserPolicy.executablePath;
-          if(launchPolicy?.args?.length||containmentPolicy?.args?.length)launchOptions.args=mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],backgroundWindowArgs);
+          if(launchPolicy?.args?.length||containmentPolicy?.args?.length||certificateArgs.length)launchOptions.args=mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateArgs,backgroundWindowArgs);
           if(muteAudio)launchOptions.args=[...(launchOptions.args||[]),'--mute-audio'];
           if(allocation)launchOptions.proxy={server:allocation.server,username:allocation.username||undefined,password:allocation.password||undefined};
           browser=await launcher.launch(launchOptions);
@@ -478,6 +480,7 @@ function createStreamingBrowserFactory({
           if(authorizedSession.cookies.length&&typeof context.addCookies==='function')await context.addCookies(authorizedSession.cookies);
           page=await context.newPage();
         }
+        if(browserEngine==='chromium')certificateDiagnostics=await attachCertificateDiagnostics({context,page,workId:workUnit?.workId});
         if(chromiumBackground) await concealBackgroundWorkerWindow({page,browserEngine,executionMode,log:()=>undefined}).catch(()=>undefined);
         page.__orbitqaInteractionMode=deviceMode==='desktop'?'cursor':'touch';
         page.setDefaultTimeout?.(10000);
@@ -537,6 +540,8 @@ function createStreamingBrowserFactory({
           page, context, browser, allocation, privacyReport, identityReport, workerGeo:resolvedWorkerContext.geo, contextValidation, browserPolicy, initialRoute,
           persistentProfile:shouldUsePersistentProfile, profileDir:shouldUsePersistentProfile?profileDir:undefined,
           deviceHardening:hardening.active?hardening.profile:null,
+          certificateTolerance:certificateArgs.length>0,
+          certificateErrors:certificateDiagnostics.snapshot(),
           async refreshProxyRoute(){return await verifyCurrentProxyRoute({isolated:true});},
           async revalidateWorkerIdentity(){
             const route=proxyRequired?await verifyCurrentProxyRoute({isolated:true}):{proxiedIp:'',error:null};
@@ -556,10 +561,11 @@ function createStreamingBrowserFactory({
             const identityCurrent=await collectRuntimeIdentity(page).catch(()=>null);
             const graphicsStability=identityBaseline&&identityCurrent?compareGraphicsStability(identityBaseline,identityCurrent):null;
             const report=buildSessionIntegrityReport({proxySource:allocation?.proxyKind || proxySource,proxyRequired,initialRoute,finalRoute,privacyReport,identityReport});
-            return {...report,workerGeo:resolvedWorkerContext.geo,contextValidation,graphicsStability};
+            return {...report,workerGeo:resolvedWorkerContext.geo,contextValidation,graphicsStability,certificateErrors:certificateDiagnostics.snapshot()};
           },
           async close(){
             if (closed) return; closed=true;
+            certificateDiagnostics.detach();
             await context?.close?.().catch(()=>undefined);
             await browser?.close?.().catch(()=>undefined);
             if(shouldUsePersistentProfile)normalizeChromeProfileShutdownState(profileDir);
@@ -568,12 +574,19 @@ function createStreamingBrowserFactory({
           }
         };
       } catch (error) {
+        certificateDiagnostics.detach();
         await context?.close?.().catch(()=>undefined);
         await browser?.close?.().catch(()=>undefined);
         try{if(typeof profileDir!=='undefined'&&profileDir)normalizeChromeProfileShutdownState(profileDir);}catch{}
         if(releaseProfileLock){await releaseProfileLock().catch(()=>undefined);releaseProfileLock=null;}
         if (allocation?.allocationId && proxyPoolService) await proxyPoolService.release(allocation.allocationId).catch(()=>undefined);
         if(error?.code==='ORBITQA_PROFILE_LOCKED'||error?.code==='ORBITQA_PROFILE_START_FAILED')throw error;
+        // A rejected certificate is a transport condition, not a damaged profile. Surface it as
+        // retryable so the run keeps the account and retries instead of tearing everything down.
+        if(isCertificateError(error)){
+          const friendly=new Error(`${streamingPlatformLabel(account.platform)} page certificate was rejected by the browser: ${describeCertificateError(error)}`);
+          friendly.code='ORBITQA_STREAMING_RETRYABLE'; friendly.cause=error; throw friendly;
+        }
         const text=error instanceof Error?error.message:String(error);
         if(/launchPersistentContext|Target page, context or browser has been closed|process did exit|Singleton|profile.*(?:lock|use)/i.test(text)){
           const friendly=new Error(`${streamingPlatformLabel(account.platform)} browser could not start. The saved account profile may be locked or damaged. Close any browser using this account, then try again or use Repair Profile.`);

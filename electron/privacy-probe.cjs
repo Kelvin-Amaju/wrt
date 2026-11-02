@@ -1,10 +1,12 @@
 const net = require('node:net');
 
+// NOTE: strictPrivacyGuardSource and collectStrictPrivacyGuardState are serialized into the page
+// by Playwright, which sends only the function source. Module scope does NOT travel with them.
+// Every constant they use must be declared inside the function body. Anything left at module
+// scope becomes a ReferenceError in the page.
 const GUARD_FLAG = '__orbitqaStrictGuardBlocked';
 const BLOCKED_MARKER = '__orbitqaStrictBlocked';
 const GUARD_VERSION = 5;
-const REASSERT_DELAYS_MS = [0, 16, 50, 120, 300, 700, 1500, 3000, 6000];
-const MEDIA_PROBE_TIMEOUT_MS = 700;
 
 // Runs as an init script in the main world before any site code, on every document.
 //
@@ -15,6 +17,13 @@ const MEDIA_PROBE_TIMEOUT_MS = 700;
 //      so a plain instance is covered even if the accessor write is rejected.
 //   3. a bounded re-assert loop covers capabilities exposed late in the load.
 function strictPrivacyGuardSource(options) {
+  // --- page-local copies: these must NOT come from module scope (see note above) ---
+  const GUARD_FLAG = '__orbitqaStrictGuardBlocked';
+  const BLOCKED_MARKER = '__orbitqaStrictBlocked';
+  const GUARD_VERSION = 5;
+  const REASSERT_DELAYS_MS = [0, 16, 50, 120, 300, 700, 1500, 3000, 6000];
+  // ---------------------------------------------------------------------------------
+
   const config = options && typeof options === 'object' ? options : {};
   const requested = config.geolocation;
   const spoof = requested
@@ -242,9 +251,13 @@ function strictPrivacyGuardSource(options) {
 
   const reassert = () => { try { apply(); } catch { /* keep the previous guard */ } };
   if (typeof setTimeout === 'function') {
-    for (const delay of REASSERT_DELAYS_MS) {
-      try { setTimeout(reassert, delay); } catch { /* no timer support */ }
-    }
+    // Wrapped so a future missing constant degrades the re-assert loop instead of
+    // aborting the whole init script with an uncaught ReferenceError.
+    try {
+      for (const delay of REASSERT_DELAYS_MS) {
+        try { setTimeout(reassert, delay); } catch { /* no timer support */ }
+      }
+    } catch { /* delay table unavailable */ }
   }
   if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
     for (const eventName of ['readystatechange', 'DOMContentLoaded', 'load']) {
@@ -266,9 +279,14 @@ async function installStrictPrivacyGuard(context, strictMode, options) {
 
 async function collectStrictPrivacyGuardState(page) {
   return page.evaluate(async () => {
-    const flag = globalThis.__orbitqaStrictGuardBlocked || null;
+    // Page-local: this function is serialized too, so nothing may come from module scope.
+    const PROBE_TIMEOUT_MS = 700;
+    const GUARD_FLAG = '__orbitqaStrictGuardBlocked';
+    const BLOCKED_MARKER = '__orbitqaStrictBlocked';
+
+    const flag = globalThis[GUARD_FLAG] || null;
     const flagged = (key) => Boolean(flag && flag[key] === true);
-    const isMarked = (fn) => Boolean(fn && fn.__orbitqaStrictBlocked === true);
+    const isMarked = (fn) => Boolean(fn && fn[BLOCKED_MARKER] === true);
     const anyMarked = (...candidates) => candidates.some((candidate) => isMarked(candidate));
 
     const navigatorObject = globalThis.navigator;
@@ -307,7 +325,7 @@ async function collectStrictPrivacyGuardState(page) {
         if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer);
         resolve(value);
       };
-      if (typeof setTimeout === 'function') timer = setTimeout(() => finish(false), 700);
+      if (typeof setTimeout === 'function') timer = setTimeout(() => finish(false), PROBE_TIMEOUT_MS);
       const isDenied = (error) => Boolean(error && (error.name === 'NotAllowedError' || error.code === 1));
       try {
         const pending = mediaObject.getUserMedia({ video: true, audio: true });
@@ -629,6 +647,10 @@ async function collectPrivacyReport({ page, expected, proxyChecks, strictMode, r
 }
 
 module.exports = {
+  GUARD_FLAG,
+  BLOCKED_MARKER,
+  GUARD_VERSION,
+  strictPrivacyGuardSource,
   extractLiteralIpCandidates,
   classifyWebRtcPolicy,
   buildPrivacyReport,
