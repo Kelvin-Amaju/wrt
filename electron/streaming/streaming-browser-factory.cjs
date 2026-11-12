@@ -32,9 +32,9 @@ function stealthLaunchArgs(browserEngine){return browserEngine==='chromium'?desk
 function ignoreDefaultArgsFor(browserEngine){return browserEngine==='chromium'?[...IGNORE_DEFAULT_ARGS]:undefined;}
 
 // The mask runs before the permission guard and before any site code.
-async function installInitScripts(context,browserEngine){
+async function installInitScripts(context,browserEngine,seed,profile){
   if(!context||typeof context.addInitScript!=='function')throw new Error('Streaming context cannot accept init scripts');
-  if(browserEngine==='chromium')await stealth.installStealthMask(context);
+  if(browserEngine==='chromium')await stealth.installStealthMask(context,{engine:'chromium',seed,profile:profile||null});
   await context.addInitScript(strictPrivacyGuardSource,{});
 }
 
@@ -42,13 +42,13 @@ async function installInitScripts(context,browserEngine){
 async function verifyStealth(page){
   const report=await stealth.collectStealthReport(page).catch(()=>null);
   if(!report)return null;
-  const fatal=report.checks.filter(c=>!c.pass&&['webdriver','cdc-globals','chrome-object','plugins'].includes(c.id));
+  const fatal=report.checks.filter(c=>!c.pass);
   if(fatal.length)throw new Error(`Automation mask failed: ${fatal.map(c=>`${c.id}=${JSON.stringify(c.detail)}`).join(', ')}`);
   return report;
 }
 
 const STREAMING_DEVICE_PROFILES={
-  desktop:{'Desktop 1280x720':{viewport:{width:1280,height:720},screen:{width:1280,height:720},deviceScaleFactor:1,isMobile:false,hasTouch:false,userAgent:null,userAgentIncludes:'',touch:false}},
+  desktop:{'Desktop 1280x720':{viewport:{width:1280,height:720},screen:{width:1920,height:1080},deviceScaleFactor:1,isMobile:false,hasTouch:false,userAgent:null,userAgentIncludes:'',touch:false}},
   android:{
     'Pixel 11':{viewport:{width:412,height:923},screen:{width:412,height:923},deviceScaleFactor:2.625,isMobile:true,hasTouch:true,deviceName:'Pixel 11',androidVersion:'17',userAgentIncludes:'Android',touch:true},
     'Pixel 11 Pro':{viewport:{width:427,height:952},screen:{width:427,height:952},deviceScaleFactor:3,isMobile:true,hasTouch:true,deviceName:'Pixel 11 Pro',androidVersion:'17',userAgentIncludes:'Android',touch:true},
@@ -338,8 +338,8 @@ function createStreamingBrowserFactory({
           ...(geoProfile?.languageHeader?{extraHTTPHeaders:{'Accept-Language':geoProfile.languageHeader}}:{}),
           proxy:{server:allocation.server,username:allocation.username||undefined,password:allocation.password||undefined},
         });
-        await installInitScripts(context,'chromium');
-        await desktopHardening.installDesktopHardening(context,null);
+        const manualSeed=stealth.stealthSeed('manual-login',account.id||profileToken||Date.now());
+        await installInitScripts(context,'chromium',manualSeed,null);
         const existingPages=typeof context.pages==='function'?context.pages():[];
         const page=existingPages?.[0]||await context.newPage();
         const stealthReport=await verifyStealth(page);
@@ -397,6 +397,7 @@ function createStreamingBrowserFactory({
       let certificateDiagnostics = { detach: () => {}, errors: [], snapshot: () => [] };
       const proxyRequired = proxySource !== 'none';
       let profileDir;
+      const seed = stealth.stealthSeed(runId, workUnit?.workId, account.id, account.platform);
       try {
         if (proxyRequired) {
           if (!proxyPoolService) throw new Error('Proxy pool service is unavailable for streaming QA');
@@ -498,8 +499,7 @@ function createStreamingBrowserFactory({
           const browserVersion=browser?.version?.()||'';
           if(browserEngine==='chromium'&&browserVersion)assertSupportedChromiumVersion(browserVersion);
           const existingPages=typeof context.pages==='function'?context.pages():[];
-          await installInitScripts(context,browserEngine);
-          if(hardening.active)await hardening.afterCreate(context);
+          await installInitScripts(context,browserEngine,seed,hardening.profile||null);
           if(typeof context.newPage==='function'){
             page=await context.newPage();
             for(const existingPage of existingPages||[]){
@@ -524,8 +524,7 @@ function createStreamingBrowserFactory({
           if(browserEngine==='chromium')assertSupportedChromiumVersion(browser.version?.()||'');
           if(authorizedSession.storageState)contextOptions.storageState=authorizedSession.storageState;
           context=await browser.newContext(contextOptions);
-          await installInitScripts(context,browserEngine);
-          if(hardening.active)await hardening.afterCreate(context);
+          await installInitScripts(context,browserEngine,seed,hardening.profile||null);
           if(authorizedSession.cookies.length&&typeof context.addCookies==='function')await context.addCookies(authorizedSession.cookies);
           page=await context.newPage();
         }

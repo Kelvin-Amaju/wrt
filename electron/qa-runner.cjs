@@ -79,6 +79,7 @@ const {
 } = require("./mandatory-interaction-delay.cjs");
 const deviceHardening = require("./device-hardening.cjs");
 const desktopHardening = require("./desktop-hardening.cjs");
+const stealth = require("./stealth-automation-mask.cjs");
 
 const SUPPORTED_BROWSERS = new Set([
   "chrome-installed",
@@ -1478,6 +1479,42 @@ async function captureEvidenceScreenshot(page, context) {
   }
 }
 
+/* Real pointer approach before a click. Playwright's click() teleports the cursor,
+   which is the single easiest input-authenticity signal to score. */
+async function approachAndClick(page, target, context = {}) {
+  const box = await target.boundingBox().catch(() => null);
+  if (!box || !box.width || !box.height) {
+    await target.click();
+    return;
+  }
+  const jitter = () => 0.35 + Math.random() * 0.3;
+  const x = box.x + box.width * jitter();
+  const y = box.y + box.height * jitter();
+  const startX = Math.max(1, x - 120 - Math.random() * 220);
+  const startY = Math.max(1, y - 80 - Math.random() * 180);
+  await page.mouse.move(startX, startY);
+  await page.mouse.move(x, y, { steps: 12 + Math.floor(Math.random() * 20) });
+  await page.waitForTimeout(40 + Math.random() * 90);
+  await page.mouse.down();
+  await page.waitForTimeout(45 + Math.random() * 70);
+  await page.mouse.up();
+  context.afterClick?.();
+}
+
+/* Trusted typing through the real input pipeline: keydown/keypress/keyup with
+   variable inter-key timing and occasional word-boundary pauses. */
+async function trustedType(page, target, value, context = {}) {
+  const text = String(value ?? "");
+  await target.focus().catch(() => undefined);
+  const base = Math.max(35, Number(context.pacing?.typingDelayMs) || 105);
+  for (let index = 0; index < text.length; index += 1) {
+    context.lifetime?.throwIfExpired?.();
+    await page.keyboard.type(text[index], { delay: base + Math.random() * base });
+    if (/\s/.test(text[index]) && Math.random() < 0.25)
+      await page.waitForTimeout(120 + Math.random() * 260);
+  }
+}
+
 async function executeStep(page, step, context) {
   context.lifetime?.throwIfExpired?.();
   switch (step.type) {
@@ -1514,12 +1551,7 @@ async function executeStep(page, step, context) {
         await waitBeforePageInteraction({ lifetime: context.lifetime });
         if (context.indicator?.pulse)
           await context.indicator.pulse(page, { mode: context.indicatorMode });
-        await target.click({
-          timeout: Math.min(
-            10000,
-            Math.max(250, context.lifetime?.remainingMs?.() || 10000),
-          ),
-        });
+        await approachAndClick(page, target, context);
       });
       return;
     }
@@ -1531,10 +1563,8 @@ async function executeStep(page, step, context) {
           await context.indicator.move(page, target, {
             mode: context.indicatorMode,
           });
-        await progressiveType(target, step.value, {
-          delayMs: context.pacing?.typingDelayMs,
-          lifetime: context.lifetime,
-        });
+        await waitBeforePageInteraction({ lifetime: context.lifetime });
+        await trustedType(page, target, step.value, context);
       });
       return;
     }
@@ -2150,6 +2180,26 @@ function shouldRunBehaviorSteps(report) {
   return !report?.blocked;
 }
 
+async function installStealthForContext(context, { engine, seed, profile }) {
+  if (engine !== "chromium" && engine !== "webkit") return null;
+  await stealth.installStealthMask(context, {
+    engine,
+    seed: seed || stealth.stealthSeed("default"),
+    profile: profile || null,
+  });
+  return stealth;
+}
+
+async function assertStealth(page, label) {
+  const report = await stealth.collectStealthReport(page).catch(() => null);
+  if (!report) return null;
+  if (report.passed) return report;
+  const failures = report.checks.filter((check) => !check.pass);
+  throw new Error(
+    `${label} automation mask incomplete: ${failures.map((c) => `${c.id}=${JSON.stringify(c.detail)}`).join(", ")}`,
+  );
+}
+
 async function createPrivacyReadyPage(context, strictMode) {
   if (typeof context?.clearPermissions === "function")
     await context.clearPermissions();
@@ -2222,6 +2272,18 @@ function isRetryableRotatingNavigationFailure(error, signal, lifetime) {
   return true;
 }
 
+async function applyGuestBuildProps(device, profile, log = () => {}) {
+  const props = deviceHardening.buildHardeningProps(profile);
+  for (const prop of props) {
+    try {
+      await device.shell(`setprop ${prop}`);
+    } catch (error) {
+      log(`Build prop not applied: ${prop} (${error?.message || error})`);
+    }
+  }
+  return props.length;
+}
+
 async function executeAndroidRun({
   runId,
   normalized,
@@ -2284,6 +2346,17 @@ async function executeAndroidRun({
     await device
       .shell("am force-stop com.android.chrome")
       .catch(() => undefined);
+    // Build props must be set before Chrome starts, otherwise the guest still
+    // reports sdk_gphone / generic to anything reading them.
+    if (hardeningProfile) {
+      const applied = await applyGuestBuildProps(device, hardeningProfile, (message) =>
+        push({ type: "log", message }),
+      );
+      push({
+        type: "log",
+        message: `Applied ${applied} retail build props before Chrome start`,
+      });
+    }
     context = await device.launchBrowser(
       hardeningProfile
         ? { args: deviceHardening.buildHardeningArgs(hardeningProfile) }
@@ -2305,8 +2378,13 @@ async function executeAndroidRun({
       context,
       normalized.privacy.strictMode,
     );
-    if (hardeningProfile)
-      await deviceHardening.installDeviceHardening(context, hardeningProfile);
+    if (hardeningProfile) {
+      await deviceHardening.installDeviceHardening(
+        context,
+        hardeningProfile,
+        stealth.stealthSeed(runId, normalized.deviceName),
+      );
+    }
     page.setDefaultTimeout(10000);
 
     const navigationStarted = Date.now();
@@ -2362,16 +2440,15 @@ async function executeAndroidRun({
         () => deviceHardening.collectHardeningReport(page, hardeningProfile),
       );
       push({
-        type: "device-hardening",
+        type: deviceHardening.HARDENING_EVENT,
         sessionId: 1,
         message: hardeningReport.passed
           ? "Device hardening passed all three checks"
-          : `Device hardening incomplete: ${hardeningReport.checks
-              .filter((check) => !check.pass)
-              .map((check) => check.id)
-              .join(", ")}`,
+          : `Device hardening incomplete: ${hardeningReport.failures.join(", ")}`,
         deviceHardening: hardeningReport,
       });
+
+      
     }
 
     for (let index = 0; index < normalized.steps.length; index += 1) {
@@ -2825,6 +2902,15 @@ async function executeAndroidAvdMatrixWorkUnit({
     await device
       .shell?.("am force-stop com.android.chrome")
       .catch(() => undefined);
+    if (hardeningProfile) {
+      const applied = await applyGuestBuildProps(device, hardeningProfile, (message) =>
+        pushWork({ type: "log", message }),
+      );
+      pushWork({
+        type: "log",
+        message: `Applied ${applied} retail build props before Chrome start`,
+      });
+    }
     // Hardened AVDs launch Chrome on the guest with the AutomationControlled blink
     // feature disabled. Non-hardened AVDs keep the original bare launch.
     context = await device.launchBrowser(
@@ -2875,10 +2961,15 @@ async function executeAndroidAvdMatrixWorkUnit({
       settings.privacy.strictMode,
     );
     // Register the hardening init script after the privacy guard so it wins the
-    // last-write for navigator.webdriver, UA and WebGL. It applies to the next
+    // last write for webdriver, platform and WebGL. It applies to the next
     // navigation, which is the target load below.
-    if (hardeningProfile)
-      await deviceHardening.installDeviceHardening(context, hardeningProfile);
+    if (hardeningProfile) {
+      await deviceHardening.installDeviceHardening(
+        context,
+        hardeningProfile,
+        stealth.stealthSeed(runId, serial),
+      );
+    }
     page.setDefaultTimeout?.(10000);
     let resolver = createBlockingSurfaceResolver({
       page,
@@ -3010,6 +3101,8 @@ async function executeAndroidAvdMatrixWorkUnit({
           : `Device hardening incomplete: ${failedChecks.join(", ")}`,
         deviceHardening: hardeningReport,
       });
+      if (!hardeningReport.passed)
+        throw new Error(`Device hardening incomplete: ${failedChecks.join(", ")}`);
     }
 
     await executeConfiguredBehavior({
@@ -3391,6 +3484,8 @@ async function executeMatrixQaRun({
         let activeContextValidation = null;
         let emulationHardening = null;
         let desktopPlan = null;
+        let stealthReport = null;
+        let stealthSeedForWork = "";
 
         const cleanupBrowserAttempt = async (reason = "retry-cleanup") => {
           if (lifetime && !lifetime.reason)
@@ -3655,8 +3750,18 @@ async function executeMatrixQaRun({
               // Register the hardening init script once the context exists and before the
               // first navigation, so it wins the last write for webdriver / UA / WebGL.
               if (emulationHardening?.active)
-                await emulationHardening.afterCreate(context);
-              if (desktopPlan?.active) await desktopPlan.afterCreate(context);
+                await emulationHardening.afterCreate(context, stealthSeedForWork);
+              if (desktopPlan?.active)
+                await desktopPlan.afterCreate(context, stealthSeedForWork);
+              // The mask is the only layer allowed to patch the page surface. It runs
+              // for every host Chromium and WebKit context.
+              if (!emulationHardening?.active && !desktopPlan?.active) {
+                await installStealthForContext(context, {
+                  engine: browserEngine,
+                  seed: stealthSeedForWork,
+                  profile: null,
+                });
+              }
               if (
                 workUnit.useCookies === true &&
                 cookieStore?.pickAny &&
@@ -3838,6 +3943,13 @@ async function executeMatrixQaRun({
             });
           }
         };
+
+        stealthSeedForWork = stealth.stealthSeed(
+          runId,
+          workUnit.workId,
+          settings.deviceName || "",
+          settings.browser,
+        );
 
         let preflightAttempt = 1;
         while (true) {
@@ -4052,14 +4164,11 @@ async function executeMatrixQaRun({
                 emulationHardening.profile,
               ),
           );
-          const failedChecks = hardeningReport.checks
-            .filter((check) => !check.pass)
-            .map((check) => check.id);
           pushWork({
             type: deviceHardening.HARDENING_EVENT,
             message: hardeningReport.passed
               ? "Device hardening passed all three checks (automation flag, runtime fingerprint, device identity)"
-              : `Device hardening incomplete: ${failedChecks.join(", ")}`,
+              : `Device hardening incomplete: ${hardeningReport.failures.join(", ")}`,
             deviceHardening: hardeningReport,
           });
         } else if (desktopPlan?.active) {
@@ -4070,17 +4179,24 @@ async function executeMatrixQaRun({
             lifetime,
             () => desktopHardening.collectDesktopHardeningReport(page),
           );
-          const failedChecks = hardeningReport.checks
-            .filter((check) => !check.pass)
-            .map((check) => check.id);
+          stealthReport = hardeningReport;
           pushWork({
             type: desktopHardening.HARDENING_EVENT,
             message: hardeningReport.passed
               ? "Desktop hardening passed all three checks (automation flag, runtime fingerprint, device identity)"
-              : `Desktop hardening incomplete: ${failedChecks.join(", ")}`,
+              : `Desktop hardening incomplete: ${hardeningReport.failures.join(", ")}`,
             desktopHardening: hardeningReport,
           });
+        } else if (browserEngine === "webkit") {
+          stealthReport = await runNavigationResilientProbe(
+            page,
+            "stealth mask diagnostics",
+            pushWork,
+            lifetime,
+            () => stealth.collectStealthReport(page),
+          );
         }
+
         const preBehaviorIntegrity = emitPrivacyRouteIntegrity({
           pushWork,
           phase: "pre-behavior",
@@ -4496,8 +4612,7 @@ async function executeQaRun({
         ? resolveIosContextOptions(playwright, normalized)
         : { permissions: [] };
     if (normalized.locale) contextOptions.locale = normalized.locale;
-    if (normalized.timezoneId)
-      contextOptions.timezoneId = normalized.timezoneId;
+    if (normalized.timezoneId) contextOptions.timezoneId = normalized.timezoneId;
 
     await runPool(
       workUnits,
@@ -4525,6 +4640,7 @@ async function executeQaRun({
         let legacyIdentityBaseline = null;
         let legacyIdentityReport = null;
         let legacyDesktopPlan = null;
+        let stealthReport = null;
         let poolAllocation = null;
         let effectiveProxySource = normalized.proxySource;
         let runtimeProxy = normalized.privacy.proxy;
@@ -4704,8 +4820,19 @@ async function executeQaRun({
           context = await browser.newContext(contextOptions);
           // Apply the desktop hardening init script before the first navigation so it
           // wins the last write for navigator.webdriver and the chrome.* stubs.
+          const legacyStealthSeed = stealth.stealthSeed(
+            runId,
+            workUnit.workId,
+            normalized.browser,
+          );
           if (legacyDesktopPlan?.active)
-            await legacyDesktopPlan.afterCreate(context);
+            await legacyDesktopPlan.afterCreate(context, legacyStealthSeed);
+          else
+            await installStealthForContext(context, {
+              engine: legacyBrowserEngine,
+              seed: legacyStealthSeed,
+              profile: null,
+            });
           const trackedLegacyContext = context;
           unregisterContextResource =
             runResourceTracker?.register?.(runId, {
@@ -4980,16 +5107,22 @@ async function executeQaRun({
               lifetime,
               () => desktopHardening.collectDesktopHardeningReport(page),
             );
-            const failedChecks = hardeningReport.checks
-              .filter((check) => !check.pass)
-              .map((check) => check.id);
+            stealthReport = hardeningReport;
             pushWork({
               type: desktopHardening.HARDENING_EVENT,
               message: hardeningReport.passed
                 ? "Desktop hardening passed all three checks (automation flag, runtime fingerprint, device identity)"
-                : `Desktop hardening incomplete: ${failedChecks.join(", ")}`,
+                : `Desktop hardening incomplete: ${hardeningReport.failures.join(", ")}`,
               desktopHardening: hardeningReport,
             });
+          } else {
+            stealthReport = await runNavigationResilientProbe(
+              page,
+              "stealth mask diagnostics",
+              pushWork,
+              lifetime,
+              () => stealth.collectStealthReport(page),
+            );
           }
 
           if (normalized.deviceMode === "ios-emulation") {
@@ -5327,6 +5460,8 @@ module.exports = {
   shouldRunBehaviorSteps,
   createPrivacyReadyPage,
   executeStep,
+  approachAndClick,
+  trustedType,
   verifyPoolProxyRouteInBrowser,
   withInteractionRouteCheck,
   buildSessionIntegrityReport,
