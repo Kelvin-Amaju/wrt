@@ -72,6 +72,7 @@ function strictPrivacyGuardSource(options) {
     }
   };
 
+  // The marker is what lets the stealth mask report this function as native code.
   const markBlocked = (fn) => {
     try { Object.defineProperty(fn, BLOCKED_MARKER, { configurable: true, value: true }); } catch { /* marker is best effort */ }
     return fn;
@@ -153,7 +154,7 @@ function strictPrivacyGuardSource(options) {
   const guardPermissions = (permissions) => {
     if (permissionsQueryGuarded || !permissions || typeof permissions.query !== 'function') return;
     const nativeQuery = permissions.query.bind(permissions);
-    guardedPermissionsQuery = (descriptor) => {
+    guardedPermissionsQuery = markBlocked((descriptor) => {
       const name = descriptor && descriptor.name;
       if (guardedPermissionNames.indexOf(name) === -1) return nativeQuery(descriptor);
       const state = name === 'geolocation' && spoof ? 'granted' : 'denied';
@@ -176,7 +177,7 @@ function strictPrivacyGuardSource(options) {
           }
         })
         .catch(() => nativeQuery(descriptor));
-    };
+    });
     const prototype = globalThis.Permissions && globalThis.Permissions.prototype;
     if (prototype) define(prototype, 'query', guardedPermissionsQuery);
     if (define(permissions, 'query', guardedPermissionsQuery)) permissionsQueryGuarded = true;
@@ -189,7 +190,7 @@ function strictPrivacyGuardSource(options) {
     if (!descriptor) return false;
     const nativeGetter = descriptor.get;
     let cached = null;
-    const getter = function () {
+    const getter = markBlocked(function () {
       if (cached) return cached;
       let value = null;
       try {
@@ -201,7 +202,7 @@ function strictPrivacyGuardSource(options) {
       cached = value;
       try { onValue(value); } catch { /* keep the value even if guarding failed */ }
       return value;
-    };
+    });
     try {
       Object.defineProperty(navigatorPrototype, key, { get: getter, configurable: true, enumerable: descriptor.enumerable });
       return true;

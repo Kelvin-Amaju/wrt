@@ -187,6 +187,42 @@ function createProxyPoolService({ store, healthChecker, directIpProvider, now = 
   function reservationKey(proxyId, options = {}) { return `${reservationScope(options)}::${String(proxyId)}`; }
   function isReserved(proxyId, options = {}) { return reservations.has(reservationKey(proxyId, options)); }
 
+  // Allocation failures name the counts so the cause is visible without opening the pool.
+  function proxyAvailability(records = [], kind, options = {}) {
+    const excluded = new Set((options.excludeProxyIds || []).map(String));
+    const counts = { total: 0, usable: 0, reserved: 0, unhealthy: 0, pendingIp: 0, disabled: 0, excluded: 0 };
+    for (const record of records) {
+      if (!record || record.source === 'fetched-free' || record.kind !== kind) continue;
+      counts.total += 1;
+      if (excluded.has(String(record.id))) { counts.excluded += 1; continue; }
+      if (!record.enabled) { counts.disabled += 1; continue; }
+      if (record.staticIpChangePending) { counts.pendingIp += 1; continue; }
+      if (record.health !== 'live' && record.health !== 'slow') { counts.unhealthy += 1; continue; }
+      if (kind === 'static' && !options.allowSharedStatic && isReserved(record.id, options)) { counts.reserved += 1; continue; }
+      counts.usable += 1;
+    }
+    return counts;
+  }
+  function availabilityLine(records, kind, options = {}) {
+    const counts = proxyAvailability(records, kind, options);
+    if (!counts.total) return 'none imported';
+    const parts = [`${counts.usable}/${counts.total} usable`];
+    if (counts.reserved) parts.push(`${counts.reserved} reserved by another session`);
+    if (counts.unhealthy) parts.push(`${counts.unhealthy} not live`);
+    if (counts.pendingIp) parts.push(`${counts.pendingIp} awaiting new exit IP acceptance`);
+    if (counts.disabled) parts.push(`${counts.disabled} disabled`);
+    if (counts.excluded) parts.push(`${counts.excluded} excluded for this account`);
+    return parts.join(', ');
+  }
+  function availabilityHint(counts) {
+    if (!counts.total) return 'Import at least one proxy in Proxies.';
+    if (counts.pendingIp) return 'Accept the new static exit IP in Proxies to re-enable it.';
+    if (counts.unhealthy) return 'Health-check the pool and confirm the route is reachable.';
+    if (counts.reserved) return 'Another session holds it; close that browser or add another static proxy.';
+    if (counts.disabled) return 'Enable the proxy in Proxies.';
+    return '';
+  }
+
   function shuffleRecords(records) {
     const out=[...records];
     for(let i=out.length-1;i>0;i--){
@@ -318,7 +354,9 @@ function createProxyPoolService({ store, healthChecker, directIpProvider, now = 
       };
     }
 
-    throw new Error(`No eligible ${kind} proxy is available`);
+    const availability = proxyAvailability(all, kind, options);
+    const hint = availabilityHint(availability);
+    throw new Error(`No eligible ${kind} proxy is available (${availabilityLine(all, kind, options)}).${hint ? ` ${hint}` : ''}`);
   }
 
   async function hasEligibleKind(kind, options = {}) {
@@ -339,7 +377,10 @@ function createProxyPoolService({ store, healthChecker, directIpProvider, now = 
       hasEligibleKind('rotating', options),
       hasEligibleKind('static', options),
     ]);
-    if (!rotatingAvailable && !staticAvailable) throw new Error('No eligible proxy is available in Smart Mix');
+    if (!rotatingAvailable && !staticAvailable) {
+      const [rotatingRecords, staticRecords] = await Promise.all([store.list('rotating'), store.list('static')]);
+      throw new Error(`No eligible proxy is available in Smart Mix (rotating: ${availabilityLine(rotatingRecords, 'rotating', options)} · static: ${availabilityLine(staticRecords, 'static', options)})`);
+    }
 
     const order = rotatingAvailable && staticAvailable
       ? (random() < 0.5 ? ['rotating', 'static'] : ['static', 'rotating'])

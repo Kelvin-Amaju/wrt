@@ -1,182 +1,28 @@
 'use strict';
 
-/**
- * device-hardening.cjs - OrbitQA Desktop
+/*
+ * desktop-hardening.cjs - OrbitQA Desktop
  *
- * Makes a hardened AVD or Android-emulation session report as retail hardware to
- * browser-layer bot / fingerprint gates. Three gates:
- *   1. automation-flag      navigator.webdriver, window.chrome.*, cdc_* globals
- *   2. runtime-fingerprint  WebGL vendor+renderer, hardwareConcurrency,
- *                           deviceMemory, maxTouchPoints, platform
- *   3. device-identity      UA device token, UA-CH model/platformVersion,
- *                           retail build props
+ * Desktop counterpart to device-hardening.cjs. device-hardening assumes an
+ * Android identity (Android UA fallback, Linux armv8l platform, retail build
+ * props). This module applies the same three gates to a host desktop browser
+ * without rewriting the identity into a phone.
  *
- * Deterministic: values come from the profile, never randomised per load.
- * Every patched function/getter keeps a native-looking Function.prototype.toString.
+ * Deterministic: only overrides what the caller pins, so real Chrome values
+ * survive where the caller is silent. Chromium only - WebKit/Gecko have no
+ * window.chrome and must not be given one.
  */
 
-const DEFAULT_REAL_DEVICE_AVD = 'OrbitQA_Pixel_7_Real';
-const HARDENING_EVENT = 'device-hardening:diagnostics';
+const HARDENING_EVENT = 'desktop-hardening:diagnostics';
 
 const HARDENING_CHECKS = Object.freeze([
   'automation-flag',
   'runtime-fingerprint',
-  'device-identity'
+  'device-identity',
 ]);
 
-const REAL_DEVICE_PROFILES = Object.freeze({
-  'pixel-7-panther': Object.freeze({
-    id: 'pixel-7-panther',
-    avdNames: [DEFAULT_REAL_DEVICE_AVD, 'OrbitQA_Pixel7', 'Pixel_7_API_34', 'Pixel_7_API_35'],
-    match: ['pixel 7', 'pixel7', 'panther'],
-    model: 'Pixel 7',
-    brand: 'google',
-    manufacturer: 'Google',
-    device: 'panther',
-    product: 'panther',
-    androidVersion: '14',
-    platformVersion: '14.0.0',
-    platform: 'Linux armv8l',
-    architecture: 'arm',
-    bitness: '64',
-    buildFingerprint: 'google/panther/panther:14/UQ1A.240205.004/11269751:user/release-keys',
-    buildTags: 'release-keys',
-    buildType: 'user',
-    hardwareConcurrency: 8,
-    deviceMemory: 8,
-    maxTouchPoints: 5,
-    webglVendor: 'ARM',
-    webglRenderer: 'Mali-G710',
-    gpu: 'host',
-    screen: { width: 412, height: 915, dpr: 2.625 },
-    emulator: { ramMb: 4096, heapMb: 512 }
-  })
-});
-
-/**
- * Host-Chromium Android emulation profiles, keyed by the exact device names the
- * Device Profiles UI offers. These carry no build props (nothing to spoof natively)
- * but supply the browser-layer identity so emulation is not left wide open.
- */
-const ANDROID_EMULATION_DEVICES = Object.freeze({
-  'pixel 11': { model: 'Pixel 11', androidVersion: '17', webglVendor: 'ARM', webglRenderer: 'Mali-G715', screen: { width: 412, height: 923, dpr: 2.625 } },
-  'pixel 11 pro': { model: 'Pixel 11 Pro', androidVersion: '17', webglVendor: 'ARM', webglRenderer: 'Mali-G715', screen: { width: 427, height: 952, dpr: 3 } },
-  'pixel 11 pro xl': { model: 'Pixel 11 Pro XL', androidVersion: '17', webglVendor: 'ARM', webglRenderer: 'Mali-G715', screen: { width: 448, height: 997, dpr: 3 } },
-  'galaxy s26': { model: 'SM-S942B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 360, height: 780, dpr: 3 } },
-  'galaxy s26+': { model: 'SM-S947B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 384, height: 832, dpr: 3.75 } },
-  'galaxy s26 ultra': { model: 'SM-S948B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 384, height: 832, dpr: 3.75 } },
-  'galaxy s26 fe': { model: 'SM-S741B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 730', screen: { width: 360, height: 780, dpr: 3 } },
-  'galaxy z flip8': { model: 'SM-F776B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 360, height: 840, dpr: 3 } },
-  'galaxy z fold8 (open)': { model: 'SM-F971B', androidVersion: '16', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 840', screen: { width: 816, height: 616, dpr: 3 } },
-  'pixel 5': { model: 'Pixel 5', androidVersion: '14', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 620', screen: { width: 393, height: 851, dpr: 2.75 } },
-  'galaxy s23': { model: 'SM-S911B', androidVersion: '14', webglVendor: 'Qualcomm', webglRenderer: 'Adreno (TM) 740', screen: { width: 360, height: 780, dpr: 3 } }
-});
-
-const UA_DEVICE_RE = /(Linux; Android [\d.]+; )([^;)]+)((?: Build\/[^;)]+)?)(\))/;
-
-function normalise(value) {
-  return String(value == null ? '' : value)
-    .trim()
-    .toLowerCase()
-    .replace(/[-_.]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function findEmulationDevice(input) {
-  const key = normalise(input);
-  if (!key) return null;
-  if (ANDROID_EMULATION_DEVICES[key]) return { key, override: ANDROID_EMULATION_DEVICES[key] };
-  for (const name of Object.keys(ANDROID_EMULATION_DEVICES)) {
-    if (key.includes(name)) return { key: name, override: ANDROID_EMULATION_DEVICES[name] };
-  }
-  return null;
-}
-
-function buildEmulationProfile(key, override) {
-  const base = REAL_DEVICE_PROFILES['pixel-7-panther'];
-  return {
-    ...base,
-    id: `android-emulation:${key.replace(/[^a-z0-9]+/g, '-')}`,
-    avdNames: [],
-    match: [key],
-    emulationOnly: true,
-    model: override.model,
-    androidVersion: override.androidVersion,
-    platformVersion: `${override.androidVersion}.0.0`,
-    hardwareConcurrency: override.hardwareConcurrency || base.hardwareConcurrency,
-    deviceMemory: override.deviceMemory || base.deviceMemory,
-    webglVendor: override.webglVendor,
-    webglRenderer: override.webglRenderer,
-    screen: override.screen || base.screen
-  };
-}
-
-function findRealDeviceProfile(input) {
-  if (input && typeof input === 'object' && input.model) return input;
-  const key = normalise(input);
-  if (!key) return null;
-  for (const profile of Object.values(REAL_DEVICE_PROFILES)) {
-    if (profile.avdNames.some((name) => normalise(name) === key)) return profile;
-    if (normalise(profile.model) === key) return profile;
-    if (profile.match.some((token) => key === token || key.includes(token))) return profile;
-  }
-  const emulation = findEmulationDevice(input);
-  if (emulation) return buildEmulationProfile(emulation.key, emulation.override);
-  return null;
-}
-
-function isHardenedAvd(name) {
-  return Boolean(findRealDeviceProfile(name));
-}
-
-function resolveProfile(input) {
-  return findRealDeviceProfile(input) || REAL_DEVICE_PROFILES['pixel-7-panther'];
-}
-
-function buildHardeningArgs(profile) {
-  const p = resolveProfile(profile);
-  return [
-    '--disable-blink-features=AutomationControlled',
-    '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
-    '--disable-background-timer-throttling',
-    '--disable-renderer-backgrounding',
-    '--disable-backgrounding-occluded-windows',
-    `--window-size=${p.screen.width},${p.screen.height}`
-  ];
-}
-
-function buildHardeningProps(profile) {
-  const p = resolveProfile(profile);
-  return [
-    `ro.product.model=${p.model}`,
-    `ro.product.brand=${p.brand}`,
-    `ro.product.manufacturer=${p.manufacturer}`,
-    `ro.product.device=${p.device}`,
-    `ro.product.name=${p.product}`,
-    `ro.build.product=${p.product}`,
-    `ro.build.tags=${p.buildTags}`,
-    `ro.build.type=${p.buildType}`,
-    `ro.build.fingerprint=${p.buildFingerprint}`,
-    `ro.system.build.fingerprint=${p.buildFingerprint}`,
-    `ro.vendor.build.fingerprint=${p.buildFingerprint}`
-  ];
-}
-
-function buildHardeningUserAgent(profile, baseUa) {
-  const p = resolveProfile(profile);
-  const ua = String(baseUa || '');
-  const versionMatch = /Chrome\/(\d+)/.exec(ua);
-  const chromeVersion = versionMatch ? versionMatch[1] : '120';
-  if (/Android/.test(ua)) {
-    return ua.replace(UA_DEVICE_RE, `$1${p.model}$3$4`);
-  }
-  return `Mozilla/5.0 (Linux; Android ${p.androidVersion}; ${p.model}) AppleWebKit/537.36 ` +
-    `(KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Mobile Safari/537.36`;
-}
-
 /* Injected into the page. Must stay self-contained (it is serialised). */
-function hardeningInit(profile) {
+function desktopHardeningInit(profile) {
   const w = typeof window !== 'undefined' ? window : globalThis;
   if (!w || !w.navigator) return;
   const n = w.navigator;
@@ -204,7 +50,7 @@ function hardeningInit(profile) {
       Object.defineProperty(target, prop, {
         get: getter,
         configurable: true,
-        enumerable: existing ? existing.enumerable : true
+        enumerable: existing ? existing.enumerable : true,
       });
       return true;
     } catch (_) {
@@ -222,24 +68,31 @@ function hardeningInit(profile) {
       id: undefined,
       connect: stub('connect', function () {}),
       sendMessage: stub('sendMessage', function () {}),
-      onMessage: { addListener: stub('addListener', function () {}), removeListener: stub('removeListener', function () {}) }
+      onMessage: {
+        addListener: stub('addListener', function () {}),
+        removeListener: stub('removeListener', function () {}),
+      },
     };
   }
   if (!w.chrome.app) {
     w.chrome.app = {
       isInstalled: false,
       InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
-      RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
+      RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
     };
   }
-  if (!w.chrome.csi) w.chrome.csi = stub('csi', function () { return { onloadT: 0, startE: Date.now(), pageT: 0, tran: 15 }; });
+  if (!w.chrome.csi) {
+    w.chrome.csi = stub('csi', function () {
+      return { onloadT: 0, startE: Date.now(), pageT: 0, tran: 15 };
+    });
+  }
   if (!w.chrome.loadTimes) {
     w.chrome.loadTimes = stub('loadTimes', function () {
       return {
         requestTime: 0, startLoadTime: 0, commitLoadTime: 0, finishDocumentLoadTime: 0,
         finishLoadTime: 0, firstPaintTime: 0, firstPaintAfterLoadTime: 0,
         navigationType: 'Other', wasFetchedViaSpdy: true, wasNpnNegotiated: true,
-        npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2'
+        npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false, connectionInfo: 'h2',
       };
     });
   }
@@ -249,35 +102,39 @@ function hardeningInit(profile) {
     }
   } catch (_) {}
 
-  /* ---- gate 2: runtime fingerprint ---- */
-  defineGetter(navProto, 'hardwareConcurrency', profile.hardwareConcurrency);
-  defineGetter(navProto, 'deviceMemory', profile.deviceMemory);
-  defineGetter(navProto, 'maxTouchPoints', profile.maxTouchPoints);
-  defineGetter(navProto, 'platform', profile.platform);
+  /* ---- gate 2: runtime fingerprint, only where the caller pins a value ---- */
+  if (profile) {
+    if (profile.hardwareConcurrency) defineGetter(navProto, 'hardwareConcurrency', profile.hardwareConcurrency);
+    if (profile.deviceMemory) defineGetter(navProto, 'deviceMemory', profile.deviceMemory);
+    if (profile.maxTouchPoints !== undefined) defineGetter(navProto, 'maxTouchPoints', profile.maxTouchPoints);
+    if (profile.platform) defineGetter(navProto, 'platform', profile.platform);
+    if (profile.language) defineGetter(navProto, 'language', profile.language);
+    if (profile.languages) defineGetter(navProto, 'languages', profile.languages);
 
-  const patchGetParameter = (proto) => {
-    if (!proto || !proto.getParameter) return;
-    const original = proto.getParameter;
-    proto.getParameter = markNative(function getParameter(param) {
-      if (param === 37445) return profile.webglVendor;    // UNMASKED_VENDOR_WEBGL
-      if (param === 37446) return profile.webglRenderer;  // UNMASKED_RENDERER_WEBGL
-      if (param === 7936) return profile.webglVendor;     // VENDOR
-      if (param === 7937) return profile.webglRenderer;   // RENDERER
-      return original.call(this, param);
-    }, 'getParameter');
-  };
-  patchGetParameter(w.WebGLRenderingContext && w.WebGLRenderingContext.prototype);
-  patchGetParameter(w.WebGL2RenderingContext && w.WebGL2RenderingContext.prototype);
+    if (profile.webglVendor || profile.webglRenderer) {
+      const patchGetParameter = (proto) => {
+        if (!proto || !proto.getParameter) return;
+        const original = proto.getParameter;
+        proto.getParameter = markNative(function getParameter(param) {
+          if (param === 37445) return profile.webglVendor;    // UNMASKED_VENDOR_WEBGL
+          if (param === 37446) return profile.webglRenderer;  // UNMASKED_RENDERER_WEBGL
+          if (param === 7936) return profile.webglVendor;     // VENDOR
+          if (param === 7937) return profile.webglRenderer;   // RENDERER
+          return original.call(this, param);
+        }, 'getParameter');
+      };
+      patchGetParameter(w.WebGLRenderingContext && w.WebGLRenderingContext.prototype);
+      patchGetParameter(w.WebGL2RenderingContext && w.WebGL2RenderingContext.prototype);
+    }
+  }
 
-  try {
-    if (!w.outerWidth) Object.defineProperty(w, 'outerWidth', { get: markNative(function () { return w.innerWidth; }, 'outerWidth', 'get'), configurable: true });
-    if (!w.outerHeight) Object.defineProperty(w, 'outerHeight', { get: markNative(function () { return w.innerHeight; }, 'outerHeight', 'get'), configurable: true });
-  } catch (_) {}
-
-  /* ---- permissions: 'denied' is a driver artifact, real handsets say 'default' ---- */
+  /* ---- driver artifact: 'denied' reads as 'default' on a real desktop ---- */
   if (w.Notification && w.Notification.permission === 'denied') {
     try {
-      Object.defineProperty(w.Notification, 'permission', { get: markNative(function () { return 'default'; }, 'permission', 'get'), configurable: true });
+      Object.defineProperty(w.Notification, 'permission', {
+        get: markNative(function () { return 'default'; }, 'permission', 'get'),
+        configurable: true,
+      });
     } catch (_) {}
   }
   if (w.Permissions && w.Permissions.prototype && w.Permissions.prototype.query) {
@@ -285,113 +142,71 @@ function hardeningInit(profile) {
     w.Permissions.prototype.query = markNative(function query(descriptor) {
       return Promise.resolve(originalQuery.call(this, descriptor)).then((status) => {
         if (descriptor && descriptor.name === 'notifications' && status && status.state === 'denied') {
-          try { Object.defineProperty(status, 'state', { get: markNative(function () { return 'default'; }, 'state', 'get'), configurable: true }); } catch (_) {}
+          try {
+            Object.defineProperty(status, 'state', {
+              get: markNative(function () { return 'default'; }, 'state', 'get'),
+              configurable: true,
+            });
+          } catch (_) {}
         }
         return status;
       });
     }, 'query');
   }
-
-  /* ---- gate 3: device identity ---- */
-  let ua = String(n.userAgent || '');
-  const versionMatch = /Chrome\/(\d+)/.exec(ua);
-  const chromeVersion = versionMatch ? versionMatch[1] : '120';
-  const deviceRe = /(Linux; Android [\d.]+; )([^;)]+)((?: Build\/[^;)]+)?)(\))/;
-  if (deviceRe.test(ua)) {
-    ua = ua.replace(deviceRe, `$1${profile.model}$3$4`);
-  } else if (/Android/.test(ua)) {
-    ua = `Mozilla/5.0 (Linux; Android ${profile.androidVersion}; ${profile.model}) ` +
-      `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Mobile Safari/537.36`;
-  }
-  if (ua) defineGetter(navProto, 'userAgent', ua);
-
-  /* UA-CH: patch the real NavigatorUAData prototype instead of swapping the object,
-     so constructor.name / instanceof / toString stay genuine. */
-  const UAD = w.NavigatorUAData;
-  if (UAD && UAD.prototype && typeof UAD.prototype.getHighEntropyValues === 'function') {
-    const originalHev = UAD.prototype.getHighEntropyValues;
-    UAD.prototype.getHighEntropyValues = markNative(function getHighEntropyValues(hints) {
-      return Promise.resolve(originalHev.call(this, hints)).then((values) => {
-        const out = Object.assign({}, values);
-        out.architecture = profile.architecture;
-        out.bitness = profile.bitness;
-        out.model = profile.model;
-        out.platform = 'Android';
-        out.platformVersion = profile.platformVersion;
-        if (!out.uaFullVersion) out.uaFullVersion = `${chromeVersion}.0.0.0`;
-        return out;
-      });
-    }, 'getHighEntropyValues');
-  } else if (n.userAgentData) {
-    const brands = n.userAgentData.brands || [];
-    const nativeHev = n.userAgentData.getHighEntropyValues ? n.userAgentData.getHighEntropyValues.bind(n.userAgentData) : null;
-    const replacement = {
-      brands,
-      mobile: true,
-      platform: 'Android',
-      getHighEntropyValues: markNative(function (hints) {
-        const base = nativeHev ? nativeHev(hints) : Promise.resolve({});
-        return Promise.resolve(base).then((values) => Object.assign({}, values, {
-          architecture: profile.architecture,
-          bitness: profile.bitness,
-          model: profile.model,
-          platform: 'Android',
-          platformVersion: profile.platformVersion,
-          uaFullVersion: values.uaFullVersion || `${chromeVersion}.0.0.0`
-        }));
-      }, 'getHighEntropyValues'),
-      toJSON: markNative(function () { return { brands, mobile: true, platform: 'Android' }; }, 'toJSON')
-    };
-    defineGetter(navProto, 'userAgentData', replacement);
-  }
 }
 
-function hardeningInitSource(profile) {
-  const p = resolveProfile(profile);
-  return `(${hardeningInit.toString()})(${JSON.stringify(p)});`;
+function buildDesktopLaunchArgs(extra = []) {
+  return [
+    '--disable-blink-features=AutomationControlled',
+    '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
+    '--disable-background-timer-throttling',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    ...extra,
+  ];
 }
 
-async function installDeviceHardening(target, profile) {
-  const p = resolveProfile(profile);
-  if (!target || typeof target.addInitScript !== 'function') return false;
-  await target.addInitScript(hardeningInit, p);
+/* Removes the "Chrome is being controlled by automated test software" bar. */
+const IGNORE_DEFAULT_ARGS = ['--enable-automation'];
+
+async function installDesktopHardening(context, profile) {
+  if (!context || typeof context.addInitScript !== 'function') return false;
+  await context.addInitScript(desktopHardeningInit, profile || null);
   return true;
 }
 
 /**
- * One-shot helper for browser factories.
- * Returns hardened contextOptions plus an afterCreate hook.
- * Only fills viewport/deviceScaleFactor when the caller has not set them.
+ * Planner mirroring device-hardening.prepareHardening().
+ *
+ * Returns hardened contextOptions plus an afterCreate hook. `active` is false for
+ * non-Chromium engines, so callers can merge unconditionally.
  */
-function prepareHardening(input = {}) {
-  const profile = findRealDeviceProfile(input.avdName || input.deviceName || input.model);
-  const deviceMode = input.deviceMode || 'desktop';
-  const active = !!profile && (deviceMode === 'android' || deviceMode === 'android-emulation');
+function prepareDesktopHardening(input = {}) {
+  const browserEngine = input.browserEngine || 'chromium';
+  const active = browserEngine === 'chromium' && input.enabled !== false;
   const contextOptions = { ...(input.contextOptions || {}) };
 
   if (active) {
-    contextOptions.args = [...(contextOptions.args || []), ...buildHardeningArgs(profile)];
-    contextOptions.userAgent = buildHardeningUserAgent(profile, contextOptions.userAgent);
-    contextOptions.hasTouch = true;
-    contextOptions.isMobile = true;
-    if (contextOptions.deviceScaleFactor == null) contextOptions.deviceScaleFactor = profile.screen.dpr;
-    if (!contextOptions.viewport) contextOptions.viewport = { width: profile.screen.width, height: profile.screen.height };
+    // Playwright only honours `args` on launch(), so this list is a convenience;
+    // qa-runner merges buildDesktopLaunchArgs() into launchOptions.args explicitly.
+    contextOptions.args = [...(contextOptions.args || []), ...buildDesktopLaunchArgs()];
+    // Desktop keeps the real Chrome UA and platform. Only pin locale/timezone when
+    // supplied and not already set by the worker-context policy.
+    if (input.locale && !contextOptions.locale) contextOptions.locale = input.locale;
+    if (input.timezoneId && !contextOptions.timezoneId) contextOptions.timezoneId = input.timezoneId;
   }
 
   return {
-    profile,
     active,
     contextOptions,
     async afterCreate(context) {
       if (!active) return false;
-      return installDeviceHardening(context, profile);
-    }
+      return installDesktopHardening(context, input.profile || null);
+    },
   };
 }
 
-async function collectHardeningReport(page, profile) {
-  const p = resolveProfile(profile);
-
+async function collectDesktopHardeningReport(page) {
   const raw = await page.evaluate(() => {
     const n = navigator;
     const out = {
@@ -404,14 +219,15 @@ async function collectHardeningReport(page, profile) {
       hardwareConcurrency: n.hardwareConcurrency,
       deviceMemory: n.deviceMemory,
       maxTouchPoints: n.maxTouchPoints,
+      language: n.language,
+      languages: (n.languages || []).join(','),
       webglVendor: null,
       webglRenderer: null,
       getParameterNative: true,
-      uaDataCtor: n.userAgentData && n.userAgentData.constructor ? n.userAgentData.constructor.name : null
     };
     try {
       out.getParameterNative = /native code/.test(
-        Function.prototype.toString.call(WebGLRenderingContext.prototype.getParameter)
+        Function.prototype.toString.call(WebGLRenderingContext.prototype.getParameter),
       );
     } catch (_) {}
     try {
@@ -428,87 +244,44 @@ async function collectHardeningReport(page, profile) {
     return out;
   });
 
-  let uad = null;
-  try {
-    uad = await page.evaluate(async () => {
-      if (!navigator.userAgentData) return null;
-      const high = await navigator.userAgentData.getHighEntropyValues(
-        ['model', 'platformVersion', 'architecture', 'bitness']
-      );
-      return {
-        model: high.model,
-        platformVersion: high.platformVersion,
-        platform: navigator.userAgentData.platform,
-        mobile: navigator.userAgentData.mobile
-      };
-    });
-  } catch (_) {}
-
   const checks = [
     {
       id: 'automation-flag',
       pass: raw.webdriver === false && raw.chromeRuntime && raw.chromeApp && raw.cdcKeys.length === 0,
-      detail: {
-        webdriver: raw.webdriver,
-        chromeRuntime: raw.chromeRuntime,
-        chromeApp: raw.chromeApp,
-        cdcKeys: raw.cdcKeys
-      }
+      detail: { webdriver: raw.webdriver, chromeRuntime: raw.chromeRuntime, chromeApp: raw.chromeApp, cdcKeys: raw.cdcKeys },
     },
     {
       id: 'runtime-fingerprint',
-      pass: raw.hardwareConcurrency === p.hardwareConcurrency &&
-        raw.deviceMemory === p.deviceMemory &&
-        raw.maxTouchPoints === p.maxTouchPoints &&
-        raw.platform === p.platform &&
-        raw.webglVendor === p.webglVendor &&
-        raw.webglRenderer === p.webglRenderer,
+      pass: Number.isInteger(raw.hardwareConcurrency) && raw.hardwareConcurrency > 0 &&
+        Number.isInteger(raw.deviceMemory) && raw.maxTouchPoints !== undefined &&
+        raw.getParameterNative === true,
       detail: {
         hardwareConcurrency: raw.hardwareConcurrency,
         deviceMemory: raw.deviceMemory,
         maxTouchPoints: raw.maxTouchPoints,
         platform: raw.platform,
         webglVendor: raw.webglVendor,
-        webglRenderer: raw.webglRenderer
-      }
+        webglRenderer: raw.webglRenderer,
+      },
     },
     {
       id: 'device-identity',
-      pass: raw.ua.includes(p.model) &&
-        raw.ua.includes(`Android ${p.androidVersion}`) &&
-        !/sdk_gphone|generic/i.test(raw.ua) &&
-        raw.getParameterNative === true &&
-        raw.uaDataCtor === 'NavigatorUAData' &&
-        !!uad && uad.model === p.model && uad.platform === 'Android' &&
-        uad.platformVersion === p.platformVersion,
-      detail: { userAgent: raw.ua, userAgentData: uad, getParameterNative: raw.getParameterNative, uaDataCtor: raw.uaDataCtor }
-    }
+      pass: !/HeadlessChrome/i.test(raw.ua) && raw.getParameterNative === true &&
+        !/SwiftShader/i.test(String(raw.webglRenderer || '')),
+      detail: { userAgent: raw.ua, language: raw.language, languages: raw.languages, webglRenderer: raw.webglRenderer },
+    },
   ];
 
-  return {
-    profile: p.id,
-    passed: checks.every((c) => c.pass),
-    checks
-  };
+  return { passed: checks.every((c) => c.pass), checks };
 }
 
 module.exports = {
-  DEFAULT_REAL_DEVICE_AVD,
   HARDENING_EVENT,
   HARDENING_CHECKS,
-  REAL_DEVICE_PROFILES,
-  ANDROID_EMULATION_DEVICES,
-  normalise,
-  findEmulationDevice,
-  findRealDeviceProfile,
-  isHardenedAvd,
-  resolveProfile,
-  buildHardeningArgs,
-  buildHardeningProps,
-  buildHardeningUserAgent,
-  hardeningInit,
-  hardeningInitSource,
-  installDeviceHardening,
-  prepareHardening,
-  collectHardeningReport
+  IGNORE_DEFAULT_ARGS,
+  buildDesktopLaunchArgs,
+  collectDesktopHardeningReport,
+  desktopHardeningInit,
+  installDesktopHardening,
+  prepareDesktopHardening,
 };

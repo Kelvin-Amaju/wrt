@@ -1,6 +1,6 @@
 {
   "name": "orbitqa-desktop",
-  "version": "0.21.80",
+  "version": "0.21.81",
   "private": true,
   "description": "Local-first Windows desktop QA automation control panel",
   "main": "electron/main.cjs",

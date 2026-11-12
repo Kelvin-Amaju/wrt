@@ -1,7 +1,7 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {spawn}=require('node:child_process');
-const { installStrictPrivacyGuard, collectPrivacyReport } = require('../privacy-probe.cjs');
+const { strictPrivacyGuardSource, collectPrivacyReport } = require('../privacy-probe.cjs');
 const { buildSessionIntegrityReport } = require('../session-integrity.cjs');
 const { verifyPoolProxyRouteInBrowser, buildWebRtcLaunchPolicy, buildRuntimePerformanceLaunchPolicy, buildProxyContainmentLaunchPolicy, mergeLaunchArgs } = require('../qa-runner.cjs');
 const { backgroundWindowArgs:buildBackgroundWindowArgs, concealBackgroundWorkerWindow } = require('../background-window.cjs');
@@ -11,16 +11,42 @@ const { buildConsistentWorkerContext, validateWorkerContext }=require('../worker
 const { synchronizeProxyTimezone }=require('../proxy-timezone-consistency.cjs');
 const { buildDeviceExpectation, collectRuntimeIdentity, assessDeviceConsistency, compareGraphicsStability }=require('../device-consistency.cjs');
 const deviceHardening=require('../device-hardening.cjs');
+const desktopHardening=require('../desktop-hardening.cjs');
+const stealth=require('../stealth-automation-mask.cjs');
 const { createProfileLockManager }=require('./profile-lock-manager.cjs');
 const {normalizeChromeProfileShutdownState}=require('../chrome-profile-state.cjs');
 const { isCertificateError, certificateLaunchArgs, certificateContextOptions, describeCertificateError, attachCertificateDiagnostics }=require('./streaming-certificate-policy.cjs');
 
+// --enable-automation is dropped from the Chromium default set so navigator.webdriver is
+// never set by the launcher, and the "controlled by automated software" bar never renders.
+// The JS mask is the second line of defence; this is the first.
+const IGNORE_DEFAULT_ARGS=['--disable-component-update',...desktopHardening.IGNORE_DEFAULT_ARGS];
 
 function allOtherStaticProxyIds(records,selectedId){const selected=String(selectedId||'');return (records||[]).map(r=>String(r.id||'')).filter(id=>id&&id!==selected);}
 function staticProxyPlatformScope(account){
   const platform=String(account?.platform||'').trim().toLowerCase();
   return platform?`platform:${platform}`:`account:${String(account?.id||'unknown')}`;
 }
+// Chromium-only. WebKit has no window.chrome and must not be given one.
+function stealthLaunchArgs(browserEngine){return browserEngine==='chromium'?desktopHardening.buildDesktopLaunchArgs():[];}
+function ignoreDefaultArgsFor(browserEngine){return browserEngine==='chromium'?[...IGNORE_DEFAULT_ARGS]:undefined;}
+
+// The mask runs before the permission guard and before any site code.
+async function installInitScripts(context,browserEngine){
+  if(!context||typeof context.addInitScript!=='function')throw new Error('Streaming context cannot accept init scripts');
+  if(browserEngine==='chromium')await stealth.installStealthMask(context);
+  await context.addInitScript(strictPrivacyGuardSource,{});
+}
+
+// A mask that silently failed is worse than one that never ran, so the decisive checks throw.
+async function verifyStealth(page){
+  const report=await stealth.collectStealthReport(page).catch(()=>null);
+  if(!report)return null;
+  const fatal=report.checks.filter(c=>!c.pass&&['webdriver','cdc-globals','chrome-object','plugins'].includes(c.id));
+  if(fatal.length)throw new Error(`Automation mask failed: ${fatal.map(c=>`${c.id}=${JSON.stringify(c.detail)}`).join(', ')}`);
+  return report;
+}
+
 const STREAMING_DEVICE_PROFILES={
   desktop:{'Desktop 1280x720':{viewport:{width:1280,height:720},screen:{width:1280,height:720},deviceScaleFactor:1,isMobile:false,hasTouch:false,userAgent:null,userAgentIncludes:'',touch:false}},
   android:{
@@ -230,6 +256,9 @@ function createStreamingBrowserFactory({
           '--disable-ipc-flooding-protection',
           '--hide-crash-restore-bubble',
           '--disable-session-crashed-bubble',
+          // Keeps AutomationControlled off even when the operator's Chrome is already
+          // running with a debugger attached.
+          '--disable-blink-features=AutomationControlled',
           // A locally installed TLS-inspecting product must not block the operator from
           // completing a manual sign-in.
           '--ignore-certificate-errors',
@@ -300,18 +329,20 @@ function createStreamingBrowserFactory({
           headless:false,
           executablePath:browserPolicy.executablePath,
           chromiumSandbox:true,
-          ignoreDefaultArgs:['--disable-component-update'],
+          ignoreDefaultArgs:[...IGNORE_DEFAULT_ARGS],
           ...certificateContextOptions(),
-          args:mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateLaunchArgs({proxyRequired:true})),
+          args:mergeLaunchArgs(stealthLaunchArgs('chromium'),launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateLaunchArgs({proxyRequired:true})),
           serviceWorkers:'allow',
           locale:geoProfile?.locale||'en-US',
           ...(proxyTimezone?{timezoneId:proxyTimezone}:{}),
           ...(geoProfile?.languageHeader?{extraHTTPHeaders:{'Accept-Language':geoProfile.languageHeader}}:{}),
           proxy:{server:allocation.server,username:allocation.username||undefined,password:allocation.password||undefined},
         });
-        await installStrictPrivacyGuard(context,true);
+        await installInitScripts(context,'chromium');
+        await desktopHardening.installDesktopHardening(context,null);
         const existingPages=typeof context.pages==='function'?context.pages():[];
         const page=existingPages?.[0]||await context.newPage();
+        const stealthReport=await verifyStealth(page);
         certificateDiagnostics=await attachCertificateDiagnostics({context,page});
         const route=await verifyRoute({page,proxyPoolService,routeCheckUrl,secrets:[allocation.username,allocation.password].filter(Boolean)});
         if(route?.error||!route?.proxiedIp)throw new Error(route?.error||'Assigned proxy route could not be verified for manual login');
@@ -328,6 +359,7 @@ function createStreamingBrowserFactory({
           processId:0,
           proxySource,
           proxyExitIp:route.proxiedIp,
+          stealthReport,
           certificateErrors:certificateDiagnostics.snapshot(),
           async close(){
             if(closed)return;closed=true;
@@ -360,9 +392,11 @@ function createStreamingBrowserFactory({
       let page = null;
       let initialRoute = null;
       let privacyReport = null;
+      let stealthReport = null;
       let releaseProfileLock = null;
       let certificateDiagnostics = { detach: () => {}, errors: [], snapshot: () => [] };
       const proxyRequired = proxySource !== 'none';
+      let profileDir;
       try {
         if (proxyRequired) {
           if (!proxyPoolService) throw new Error('Proxy pool service is unavailable for streaming QA');
@@ -401,18 +435,33 @@ function createStreamingBrowserFactory({
           exposeProxyGeolocation:false,
         });
         const contextOptions={...resolvedWorkerContext.options,...certificateOptions};
-        const hardening=deviceHardening.prepareHardening({
-          deviceMode,
-          deviceName:workUnit?.deviceProfile,
-          avdName:workUnit?.androidAvdName,
-          contextOptions,
-        });
+        // Desktop used to fall through here untouched because device hardening is Android-only.
+        // Every desktop Chromium session now goes through desktop hardening instead.
+        const hardening=deviceMode==='desktop'
+          ? desktopHardening.prepareDesktopHardening({
+              browserEngine,
+              contextOptions,
+              locale:contextOptions.locale||geoProfile?.locale||'',
+              timezoneId:contextOptions.timezoneId||proxyTimezone||'',
+            })
+          : deviceHardening.prepareHardening({
+              deviceMode,
+              deviceName:workUnit?.deviceProfile,
+              avdName:workUnit?.androidAvdName,
+              contextOptions,
+            });
         Object.assign(contextOptions,hardening.contextOptions);
-        if(browserPolicy?.compatibilityMode && !hardening.active) delete contextOptions.userAgent;
-        const contextValidation=validateWorkerContext({profile,deviceMode,contextOptions,allocation:geoConsistencyFromProxy&&allocation?.geoVerified===true?allocation:null,compatibilityMode:Boolean(browserPolicy?.compatibilityMode)&&!hardening.active});
+        // Playwright only reads args at launch(), so lift them out of the context options.
+        const hardeningArgs=Array.isArray(contextOptions.args)?contextOptions.args:[];
+        delete contextOptions.args;
+        // Desktop hardening supplies no user agent, so compatibility mode still owns the UA.
+        const hardeningOwnsIdentity=hardening.active&&deviceMode!=='desktop';
+        const compatibilityMode=Boolean(browserPolicy?.compatibilityMode)&&!hardeningOwnsIdentity;
+        if(compatibilityMode)delete contextOptions.userAgent;
+        const contextValidation=validateWorkerContext({profile,deviceMode,contextOptions,allocation:geoConsistencyFromProxy&&allocation?.geoVerified===true?allocation:null,compatibilityMode});
         if(!contextValidation.ok) throw new Error(`Streaming worker identity is inconsistent: ${contextValidation.issues.join(', ')}`);
         const authorizedSession=(!restoreStoredSession||ignoreStoredSession)?{kind:'none',storageState:null,cookies:[]}:parseAuthorizedSessionState(account.sessionSecret,account.platform);
-        const profileDir=browserEngine==='chromium'?String(profileDirOverride||persistentProfileDir(profileBaseDir,account)):'';
+        profileDir=browserEngine==='chromium'?String(profileDirOverride||persistentProfileDir(profileBaseDir,account)):'';
         const shouldUsePersistentProfile=Boolean(usePersistentProfile&&profileDir&&typeof launcher.launchPersistentContext==='function');
         if(shouldUsePersistentProfile){
           fs.mkdirSync(profileDir,{recursive:true});
@@ -425,10 +474,10 @@ function createStreamingBrowserFactory({
           const persistentOptions={...contextOptions,headless:runtimeHeadless};
           if(browserEngine==='chromium'){
             persistentOptions.chromiumSandbox=true;
-            persistentOptions.ignoreDefaultArgs=['--disable-component-update'];
+            persistentOptions.ignoreDefaultArgs=[...IGNORE_DEFAULT_ARGS];
           }
           if(browserPolicy.executablePath)persistentOptions.executablePath=browserPolicy.executablePath;
-          if(launchPolicy?.args?.length||containmentPolicy?.args?.length||certificateArgs.length)persistentOptions.args=mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateArgs,backgroundWindowArgs);
+          persistentOptions.args=mergeLaunchArgs(hardeningArgs,stealthLaunchArgs(browserEngine),launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateArgs,backgroundWindowArgs);
           if(muteAudio)persistentOptions.args=[...(persistentOptions.args||[]),'--mute-audio'];
           if(allocation)persistentOptions.proxy={server:allocation.server,username:allocation.username||undefined,password:allocation.password||undefined};
           normalizeChromeProfileShutdownState(profileDir);
@@ -449,8 +498,8 @@ function createStreamingBrowserFactory({
           const browserVersion=browser?.version?.()||'';
           if(browserEngine==='chromium'&&browserVersion)assertSupportedChromiumVersion(browserVersion);
           const existingPages=typeof context.pages==='function'?context.pages():[];
-          await installStrictPrivacyGuard(context,true);
-          await hardening.afterCreate(context);
+          await installInitScripts(context,browserEngine);
+          if(hardening.active)await hardening.afterCreate(context);
           if(typeof context.newPage==='function'){
             page=await context.newPage();
             for(const existingPage of existingPages||[]){
@@ -465,21 +514,22 @@ function createStreamingBrowserFactory({
           const launchOptions={headless:runtimeHeadless};
           if(browserEngine==='chromium'){
             launchOptions.chromiumSandbox=true;
-            launchOptions.ignoreDefaultArgs=['--disable-component-update'];
+            launchOptions.ignoreDefaultArgs=[...IGNORE_DEFAULT_ARGS];
           }
           if(browserPolicy.executablePath)launchOptions.executablePath=browserPolicy.executablePath;
-          if(launchPolicy?.args?.length||containmentPolicy?.args?.length||certificateArgs.length)launchOptions.args=mergeLaunchArgs(launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateArgs,backgroundWindowArgs);
+          launchOptions.args=mergeLaunchArgs(hardeningArgs,stealthLaunchArgs(browserEngine),launchPolicy?.args||[],containmentPolicy?.args||[],performancePolicy?.args||[],certificateArgs,backgroundWindowArgs);
           if(muteAudio)launchOptions.args=[...(launchOptions.args||[]),'--mute-audio'];
           if(allocation)launchOptions.proxy={server:allocation.server,username:allocation.username||undefined,password:allocation.password||undefined};
           browser=await launcher.launch(launchOptions);
           if(browserEngine==='chromium')assertSupportedChromiumVersion(browser.version?.()||'');
           if(authorizedSession.storageState)contextOptions.storageState=authorizedSession.storageState;
           context=await browser.newContext(contextOptions);
-          await installStrictPrivacyGuard(context,true);
-          await hardening.afterCreate(context);
+          await installInitScripts(context,browserEngine);
+          if(hardening.active)await hardening.afterCreate(context);
           if(authorizedSession.cookies.length&&typeof context.addCookies==='function')await context.addCookies(authorizedSession.cookies);
           page=await context.newPage();
         }
+        if(browserEngine==='chromium')stealthReport=await verifyStealth(page);
         if(browserEngine==='chromium')certificateDiagnostics=await attachCertificateDiagnostics({context,page,workId:workUnit?.workId});
         if(chromiumBackground) await concealBackgroundWorkerWindow({page,browserEngine,executionMode,log:()=>undefined}).catch(()=>undefined);
         page.__orbitqaInteractionMode=deviceMode==='desktop'?'cursor':'touch';
@@ -537,9 +587,10 @@ function createStreamingBrowserFactory({
 
         let closed=false;
         return {
-          page, context, browser, allocation, privacyReport, identityReport, workerGeo:resolvedWorkerContext.geo, contextValidation, browserPolicy, initialRoute,
+          page, context, browser, allocation, privacyReport, identityReport, stealthReport, workerGeo:resolvedWorkerContext.geo, contextValidation, browserPolicy, initialRoute,
           persistentProfile:shouldUsePersistentProfile, profileDir:shouldUsePersistentProfile?profileDir:undefined,
           deviceHardening:hardening.active?hardening.profile:null,
+          desktopHardening:hardening.active&&deviceMode==='desktop',
           certificateTolerance:certificateArgs.length>0,
           certificateErrors:certificateDiagnostics.snapshot(),
           async refreshProxyRoute(){return await verifyCurrentProxyRoute({isolated:true});},
@@ -561,7 +612,7 @@ function createStreamingBrowserFactory({
             const identityCurrent=await collectRuntimeIdentity(page).catch(()=>null);
             const graphicsStability=identityBaseline&&identityCurrent?compareGraphicsStability(identityBaseline,identityCurrent):null;
             const report=buildSessionIntegrityReport({proxySource:allocation?.proxyKind || proxySource,proxyRequired,initialRoute,finalRoute,privacyReport,identityReport});
-            return {...report,workerGeo:resolvedWorkerContext.geo,contextValidation,graphicsStability,certificateErrors:certificateDiagnostics.snapshot()};
+            return {...report,workerGeo:resolvedWorkerContext.geo,contextValidation,graphicsStability,stealthReport,certificateErrors:certificateDiagnostics.snapshot()};
           },
           async close(){
             if (closed) return; closed=true;
@@ -590,7 +641,7 @@ function createStreamingBrowserFactory({
         const text=error instanceof Error?error.message:String(error);
         if(/launchPersistentContext|Target page, context or browser has been closed|process did exit|Singleton|profile.*(?:lock|use)/i.test(text)){
           const friendly=new Error(`${streamingPlatformLabel(account.platform)} browser could not start. The saved account profile may be locked or damaged. Close any browser using this account, then try again or use Repair Profile.`);
-          friendly.code='ORBITQA_PROFILE_START_FAILED'; throw friendly;
+          error.code='ORBITQA_PROFILE_START_FAILED'; throw friendly;
         }
         throw error;
       }
